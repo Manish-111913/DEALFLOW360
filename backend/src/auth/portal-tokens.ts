@@ -93,10 +93,18 @@ export async function consumePortalLink(rawToken: string): Promise<ConsumeResult
   });
   if (!portalUser) return { ok: false, reason: "no_portal_user" };
 
-  await prisma.portalAccessToken.update({
-    where: { id: record.id },
+  // Burn the token atomically.
+  //
+  // The consumedAt check above is a fast path, not the guarantee: between that
+  // read and this write, a second request presenting the same link could pass
+  // the same check. The conditional update closes that window - it only matches
+  // while consumedAt is still null, so exactly one caller can ever win, and the
+  // loser is told the link was already used.
+  const burned = await prisma.portalAccessToken.updateMany({
+    where: { id: record.id, consumedAt: null },
     data: { consumedAt: now },
   });
+  if (burned.count === 0) return { ok: false, reason: "already_used" };
 
   return { ok: true, userId: portalUser.id, customerId: record.customerId };
 }

@@ -25,6 +25,9 @@ export const SETTING_KEYS = {
   quoteNumberPrefix: "quotation.numberPrefix",
   quoteNumberPadding: "quotation.numberPadding",
   targetMarginPercentage: "margin.targetPercentage",
+  discountFallbackCeiling: "discount.fallbackCeiling",
+  upsellMinCoPurchaseSample: "upsell.minCoPurchaseSample",
+  invoiceNumberPrefix: "invoice.numberPrefix",
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -38,6 +41,14 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   [SETTING_KEYS.quoteNumberPadding]: "4",
   // 03_BUSINESS_RULES.md: "a configured target (default 30%, set per company)".
   [SETTING_KEYS.targetMarginPercentage]: "30",
+  // D10's last resort. Zero on purpose: if neither a category policy nor a tier
+  // default exists, every discount reads as a violation and a human is asked.
+  // Failing loud beats silently approving an unchecked discount.
+  [SETTING_KEYS.discountFallbackCeiling]: "0",
+  // A pairing seen in a single order would otherwise claim a 100%
+  // co-purchase rate and outrank every genuine one.
+  [SETTING_KEYS.upsellMinCoPurchaseSample]: "5",
+  [SETTING_KEYS.invoiceNumberPrefix]: "INV",
 };
 
 export const SETTING_DESCRIPTIONS: Record<SettingKey, string> = {
@@ -49,6 +60,11 @@ export const SETTING_DESCRIPTIONS: Record<SettingKey, string> = {
     "Digits the sequence in a quotation number is padded to.",
   [SETTING_KEYS.targetMarginPercentage]:
     "Target margin; the risk engine scores any shortfall against it.",
+  [SETTING_KEYS.discountFallbackCeiling]:
+    "Ceiling used when no category policy and no tier default exist.",
+  [SETTING_KEYS.upsellMinCoPurchaseSample]:
+    "Minimum orders containing a product before its pairings are trusted.",
+  [SETTING_KEYS.invoiceNumberPrefix]: "Prefix for generated invoice numbers.",
 };
 
 export interface ResolvedSettings {
@@ -57,6 +73,9 @@ export interface ResolvedSettings {
   quoteNumberPrefix: string;
   quoteNumberPadding: number;
   targetMarginPercentage: Prisma.Decimal;
+  discountFallbackCeiling: Prisma.Decimal;
+  upsellMinCoPurchaseSample: number;
+  invoiceNumberPrefix: string;
 }
 
 /**
@@ -90,6 +109,9 @@ export async function getSettings(): Promise<ResolvedSettings> {
     quoteNumberPrefix: raw(map, SETTING_KEYS.quoteNumberPrefix),
     quoteNumberPadding: Number(raw(map, SETTING_KEYS.quoteNumberPadding)),
     targetMarginPercentage: new Decimal(raw(map, SETTING_KEYS.targetMarginPercentage)),
+    discountFallbackCeiling: new Decimal(raw(map, SETTING_KEYS.discountFallbackCeiling)),
+    upsellMinCoPurchaseSample: Number(raw(map, SETTING_KEYS.upsellMinCoPurchaseSample)),
+    invoiceNumberPrefix: raw(map, SETTING_KEYS.invoiceNumberPrefix),
   };
 }
 
@@ -112,6 +134,13 @@ function validate(key: SettingKey, value: string): void {
       }
       return;
     }
+    case SETTING_KEYS.upsellMinCoPurchaseSample: {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 1000) {
+        throw new ValidationError("Minimum sample must be a whole number from 1 to 1000.", key);
+      }
+      return;
+    }
     case SETTING_KEYS.quoteNumberPadding: {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > 10) {
@@ -119,15 +148,17 @@ function validate(key: SettingKey, value: string): void {
       }
       return;
     }
+    case SETTING_KEYS.invoiceNumberPrefix:
     case SETTING_KEYS.quoteNumberPrefix:
       if (!/^[A-Za-z0-9-]{1,8}$/.test(value)) {
         throw new ValidationError("Prefix must be 1 to 8 letters, digits or hyphens.", key);
       }
       return;
-    case SETTING_KEYS.targetMarginPercentage: {
+    case SETTING_KEYS.targetMarginPercentage:
+    case SETTING_KEYS.discountFallbackCeiling: {
       const n = new Decimal(value);
       if (n.isNaN() || n.lessThan(0) || n.greaterThan(100)) {
-        throw new ValidationError("Target margin must be between 0 and 100.", key);
+        throw new ValidationError("Value must be a percentage between 0 and 100.", key);
       }
       return;
     }

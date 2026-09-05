@@ -124,3 +124,22 @@ tests assert each one. Changing a seed price silently breaks a demo figure.
 
 Next: B-3 (Quotation & Margin Engine). Module specs live in
 `DealFlow360_Documentation/`; prompts in `40_PROMPT_LIBRARY_BACKEND.md`.
+
+## Known advisory: mysql2
+
+`npm audit` reports 4 high-severity advisories in `mysql2`. They are not acted
+on, deliberately:
+
+- `mysql2` is a transitive dependency of the **Prisma CLI**, which is a
+  `devDependency`. It is never a runtime dependency of the app.
+- Our datasource is `postgresql`. Nothing in the codebase references MySQL, and
+  `mysql2` is absent from the built server bundle (`frontend/.next/server`).
+- Both advisories require an actual MySQL connection to exploit — an auth-plugin
+  downgrade and a decompression bomb in the MySQL wire protocol.
+
+`npm audit fix --force` would **downgrade Prisma to 6.x**, a breaking major
+change, to patch a driver that is never loaded. An `overrides` entry does not
+help either: Prisma pins `mysql2` to an exact version, so the override is a
+no-op. The correct fix is upstream, in Prisma.
+
+Re-check this when upgrading Prisma.

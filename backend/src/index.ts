@@ -137,3 +137,160 @@ export {
   APPROVAL_STATES_VISIBLE_TO_FINANCE,
   isPendingApproval,
 } from "./domain/approval";
+
+export {
+  computeRisk,
+  MAX_RISK_SCORE,
+  RISK_BANDS,
+  RISK_WEIGHTS,
+  riskLevelFor,
+  type DeliveryRisk,
+  type RiskFactorResult,
+  type RiskInput,
+  type RiskLineInput,
+  type RiskResult,
+} from "./engines/risk";
+
+export {
+  resolveApprovalRoute,
+  type ApprovalStepConfig,
+  type RoutingInput,
+  type RoutingResult,
+} from "./engines/approval-routing";
+
+export {
+  resolveCeilings,
+  resolveDiscountCeiling,
+  type CeilingResolution,
+  type CeilingSource,
+} from "./services/discount-policy";
+
+export {
+  decideApproval,
+  getApprovalOverview,
+  loadActiveApprovalSteps,
+  stepTypeFor,
+  submitForApproval,
+  type ApprovalDecision,
+  type DecisionResult,
+  type SubmitResult,
+} from "./services/approvals";
+
+export {
+  MAX_SUGGESTIONS,
+  rankUpsells,
+  UPSELL_WEIGHTS,
+  type UpsellCandidateInput,
+  type UpsellSuggestion,
+} from "./engines/upsell";
+
+export {
+  acceptUpsell,
+  dismissUpsell,
+  getUpsellSuggestions,
+  refreshCoPurchaseRates,
+  type RefreshResult,
+} from "./services/upsell";
+
+export {
+  planAllocation,
+  stockKey,
+  type AllocationInput,
+  type AllocationPlan,
+  type AllocationResult,
+  type DemandLine,
+  type WarehouseSnapshot,
+} from "./engines/allocation";
+
+export {
+  allocateFulfillment,
+  consolidateBackorder,
+  findConsolidatableBackorders,
+  hasFulfillmentPlan,
+  overrideAllocation,
+  planFulfillment,
+  receiveStock,
+  type AllocateResult,
+  type ConsolidationCandidate,
+  type PlanResult,
+} from "./services/fulfillment";
+
+export {
+  buildSchedule,
+  cancellationCredit,
+  firstCycleCharge,
+  midCycleQuantityDelta,
+  nextPeriod,
+  periodContaining,
+  remainingDaysFrom,
+  type BillingPeriod,
+  type ProratedAmount,
+  type ScheduleEntry,
+} from "./engines/billing";
+
+export {
+  cancelSubscription,
+  changeSubscriptionQuantity,
+  createSubscriptionsForOrder,
+  getBillingSchedule,
+  invoiceOneTimeLines,
+  recordPayment,
+  runBilling,
+  type BillingRunResult,
+  type BillingScheduleView,
+} from "./services/billing";
+
+export {
+  evaluateWhatIf,
+  type LineTerms,
+  type WhatIfInput,
+  type WhatIfResult,
+  type WorsenedLine,
+} from "./engines/negotiation";
+
+export {
+  lastApprovedSnapshot,
+  snapshotQuotation,
+  versionHistory,
+  type ApprovedSnapshot,
+  type LineSnapshot,
+} from "./services/quotation-versions";
+
+export {
+  assertNoInternalFields,
+  confirmPortalQuotation,
+  getNegotiationHistory,
+  shareWithCustomer,
+  submitNegotiation,
+  viewPortalQuotation,
+  type ConfirmResult,
+  type NegotiateResult,
+  type PortalQuotation,
+  type PortalStatus,
+  type PortalViewResult,
+} from "./services/portal";
+
+export {
+  computeDealHealth,
+  HEALTH_WEIGHTS,
+  RECOMMENDED_ACTIONS,
+  SEVERITY_BANDS,
+  severityFor,
+  type DealHealthInput,
+  type DealHealthResult,
+  type DeliveryState,
+  type HealthPenalties,
+} from "./engines/deal-health";
+
+export {
+  escalateDeal,
+  getDealHealthDashboard,
+  getHealthHistory,
+  recomputeAllDealHealth,
+  repRollingAverageDiscount,
+  resolveAlert,
+  scoreDealHealth,
+  type DashboardRow,
+  type DealHealthSnapshotResult,
+  type EscalationResult,
+} from "./services/deal-health";

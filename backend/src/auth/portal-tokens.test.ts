@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { consumePortalLink, issuePortalLink } from "./portal-tokens";
+import { consumePortalLink, hashToken, issuePortalLink } from "./portal-tokens";
 import { advanceClock, currentBusinessTime, resetClock } from "../clock";
 import { prisma } from "../db";
 
@@ -76,5 +76,32 @@ describe("D18 — portal magic links", () => {
       expect(row.tokenHash).not.toBe(rawToken);
       expect(row.tokenHash).toMatch(/^[0-9a-f]{64}$/);
     }
+  });
+});
+
+/**
+ * Single use has to hold under concurrency, not merely in sequence.
+ *
+ * Checking consumedAt and then writing it leaves a window in which two requests
+ * presenting the same link both pass the check. A magic link is a credential,
+ * so that window is a real one worth closing.
+ */
+describe("a link cannot be redeemed twice at once", () => {
+  it("lets exactly one of three simultaneous presentations through", async () => {
+    const { rawToken } = await issuePortalLink(customerId);
+
+    const results = await Promise.all([
+      consumePortalLink(rawToken),
+      consumePortalLink(rawToken),
+      consumePortalLink(rawToken),
+    ]);
+
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.filter((r) => !r.ok && r.reason === "already_used")).toHaveLength(2);
+
+    const stored = await prisma.portalAccessToken.findFirstOrThrow({
+      where: { tokenHash: hashToken(rawToken) },
+    });
+    expect(stored.consumedAt).not.toBeNull();
   });
 });

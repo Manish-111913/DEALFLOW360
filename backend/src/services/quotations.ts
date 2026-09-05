@@ -4,10 +4,16 @@ import { currentBusinessTime } from "../clock";
 import { prisma } from "../db";
 import { NotFoundError, ValidationError } from "../errors";
 import { computeOrderMargin, type DecimalValue, type MarginLineInput } from "../engines/margin";
+import { resolveApprovalRoute } from "../engines/approval-routing";
+import { computeRisk, type DeliveryRisk, type RiskResult } from "../engines/risk";
+import type { RiskLevel } from "../generated/prisma/enums";
 import { ADVISORY_LOCK } from "../locks";
 import { getSettings } from "../settings";
 import { resolveUnitPrice } from "./catalog";
+import { loadActiveApprovalSteps } from "./approvals";
 import { assertCustomerCanBeQuoted } from "./customers";
+import { resolveCeilings } from "./discount-policy";
+import { hasFulfillmentPlan, planFulfillment } from "./fulfillment";
 
 const Decimal = Prisma.Decimal;
 
@@ -29,43 +35,94 @@ export interface RecomputeResult {
   totalCost: Prisma.Decimal;
   grossMargin: Prisma.Decimal;
   marginPercentage: Prisma.Decimal;
-  explain: ReturnType<typeof computeOrderMargin>["explain"];
+  riskScore: number;
+  riskLevel: RiskLevel;
+  riskFactors: RiskResult["factors"];
+  /** Preview only. Submitting is an explicit act; this never transitions state. */
+  approvalRequired: boolean;
+  approvalReason: string;
+  explain: {
+    margin: ReturnType<typeof computeOrderMargin>["explain"];
+    risk: RiskResult["explain"];
+    routing: ReturnType<typeof resolveApprovalRoute>["explain"];
+  };
 }
 
 /**
- * Recompute everything derived from a quotation's lines.
+ * Delivery risk for the score.
  *
- * Every mutation goes through here — add, remove, quantity, price, discount,
+ * Read from the advisory pre-flight plan (D4), which reserves nothing. It can
+ * therefore be stale by the time stock is actually allocated - D15 records that
+ * variance rather than re-triggering approval. Returns NONE until B-6 starts
+ * producing plans, which is the correct answer for an order that has had no
+ * fulfilment analysis yet.
+ */
+async function deliveryRiskFor(quotationId: string): Promise<DeliveryRisk> {
+  const [openBackorders, plan] = await Promise.all([
+    prisma.backorder.count({ where: { quotationId, status: "OPEN" } }),
+    prisma.fulfillmentPlan.findFirst({
+      where: { quotationId, status: { in: ["RECOMMENDED", "ACCEPTED"] } },
+      orderBy: { createdAt: "desc" },
+      select: { estimatedShipmentCount: true },
+    }),
+  ]);
+
+  if (openBackorders > 0) return "BACKORDER";
+  if (plan && plan.estimatedShipmentCount > 1) return "SPLIT";
+  return "NONE";
+}
+
+/**
+ * Recompute everything derived from the lines of a quotation.
+ *
+ * Every mutation goes through here - add, remove, quantity, price, discount,
  * accepted upsell. One function, one call site pattern. That is the mechanism
  * that stops the numbers on a screen drifting from the numbers in the database;
  * a convention asking people to remember would not survive the build.
  *
- * The ordered chain is: margin -> risk factors -> risk score -> approval
- * requirement -> advisory fulfilment plan. Only the first step exists today;
- * B-4 and B-6 extend this function rather than adding parallel ones.
+ * The ordered chain is: ceilings -> margin -> risk factors -> risk score ->
+ * approval requirement -> advisory fulfilment plan. B-6 extends this function
+ * rather than adding a parallel one.
  */
 export async function recomputeQuotation(quotationId: string): Promise<RecomputeResult> {
   const quotation = await prisma.quotation.findUnique({
     where: { id: quotationId },
     include: {
+      customer: { select: { tier: true } },
       lines: {
         orderBy: { sequence: "asc" },
-        include: { product: { select: { tax: { select: { percentage: true } } } } },
+        include: {
+          product: {
+            select: {
+              name: true,
+              categoryId: true,
+              tax: { select: { percentage: true } },
+            },
+          },
+        },
       },
     },
   });
   if (!quotation) throw new NotFoundError(`Quotation ${quotationId} does not exist`);
 
-  const { currencyMinorUnits } = await getSettings();
+  const settings = await getSettings();
+  const { currencyMinorUnits } = settings;
 
+  // 1. Ceilings (D10: category policy -> tier default -> fallback).
+  const ceilings = await resolveCeilings(
+    quotation.customer.tier,
+    quotation.lines.map((l) => l.product.categoryId),
+  );
+
+  // 2. Margin.
   const marginInputs: MarginLineInput[] = quotation.lines.map((line) => ({
     lineId: line.id,
+    label: line.product.name,
     quantity: line.quantity,
     unitPrice: line.unitPrice,
     discountPercentage: line.discountPercentage,
     unitCost: line.unitCost,
   }));
-
   const margin = computeOrderMargin(marginInputs, { minorUnits: currencyMinorUnits });
 
   // Tax rides alongside margin but is never part of it: it is collected for the
@@ -73,17 +130,53 @@ export async function recomputeQuotation(quotationId: string): Promise<Recompute
   //
   // Commercial terms (price, cost) are snapshotted onto the line at add time, so
   // a catalogue change cannot reprice a quote a customer is looking at. A tax
-  // rate is not a commercial term — it is statutory — so while the quotation is
+  // rate is not a commercial term - it is statutory - so while the quotation is
   // still a draft it tracks the current rate. Once the quote has been sent, the
   // total the customer saw is honoured and the rate freezes.
   const taxIsLive = quotation.status === "DRAFT";
   let taxAmount = new Decimal(0);
   const now = currentBusinessTime();
 
+  // 3. Keep an existing fulfilment plan current, so the delivery outlook the
+  //    score reads is not describing a cart from three edits ago. Only
+  //    refreshed when a plan already exists: generating one for a quote nobody
+  //    has costed yet would be work on every keystroke for no benefit.
+  if (await hasFulfillmentPlan(quotationId)) {
+    await planFulfillment(quotationId);
+  }
+
+  // 4. Risk, from ceilings + margin + negotiation history + delivery outlook.
+  const risk = computeRisk({
+    lines: quotation.lines.map((line) => ({
+      lineId: line.id,
+      label: line.product.name,
+      discountPercentage: line.discountPercentage,
+      discountCeiling: ceilings.get(line.product.categoryId)?.ceiling ?? new Decimal(0),
+    })),
+    marginPercentage: margin.marginPercentage,
+    targetMarginPercentage: settings.targetMarginPercentage,
+    negotiationCount: quotation.negotiationCount,
+    deliveryRisk: await deliveryRiskFor(quotationId),
+  });
+
+  // 5. Approval requirement - a preview, not a transition.
+  const chain = await loadActiveApprovalSteps();
+  const routing = resolveApprovalRoute({
+    steps: chain,
+    score: risk.score,
+    anyLineOverCeiling: risk.anyLineOverCeiling,
+    maxLineDiscount: risk.maxLineDiscount,
+  });
+
   await prisma.$transaction(async (tx) => {
     for (const line of quotation.lines) {
       const computed = margin.lines.find((l) => l.lineId === line.id);
       if (!computed) continue;
+
+      const ceiling = ceilings.get(line.product.categoryId)?.ceiling ?? new Decimal(0);
+      const violation = line.discountPercentage.greaterThan(ceiling)
+        ? line.discountPercentage.minus(ceiling)
+        : new Decimal(0);
 
       const taxPercentage = taxIsLive
         ? (line.product.tax?.percentage ?? new Decimal(0))
@@ -98,6 +191,8 @@ export async function recomputeQuotation(quotationId: string): Promise<Recompute
         where: { id: line.id },
         data: {
           taxPercentage,
+          discountCeiling: ceiling,
+          violationPoints: violation,
           discountAmount: computed.discountAmount,
           lineSubtotal: computed.subtotal,
           lineTotal: computed.netSellingValue,
@@ -111,6 +206,21 @@ export async function recomputeQuotation(quotationId: string): Promise<Recompute
 
     taxAmount = money(taxAmount, currencyMinorUnits);
 
+    // Risk factors are rewritten wholesale, so the table always explains the
+    // current score rather than accumulating stale reasons.
+    await tx.riskFactor.deleteMany({ where: { quotationId } });
+    await tx.riskFactor.createMany({
+      data: risk.factors.map((f) => ({
+        quotationId,
+        source: f.source,
+        points: f.points,
+        description: f.description,
+        formula: f.formula,
+        sequence: f.sequence,
+        createdAt: now,
+      })),
+    });
+
     await tx.quotation.update({
       where: { id: quotationId },
       data: {
@@ -121,14 +231,13 @@ export async function recomputeQuotation(quotationId: string): Promise<Recompute
         totalCost: margin.estimatedCost,
         grossMargin: margin.grossMargin,
         marginPercentage: margin.marginPercentage,
+        riskScore: new Decimal(risk.score),
+        riskLevel: risk.level,
         updatedAt: now,
         lastActivityAt: now,
       },
     });
   });
-
-  // B-4 extends here: risk factors, risk score, approval requirement.
-  // B-6 extends here: advisory FulfillmentPlan (which reserves nothing).
 
   return {
     quotationId,
@@ -139,7 +248,12 @@ export async function recomputeQuotation(quotationId: string): Promise<Recompute
     totalCost: margin.estimatedCost,
     grossMargin: margin.grossMargin,
     marginPercentage: margin.marginPercentage,
-    explain: margin.explain,
+    riskScore: risk.score,
+    riskLevel: risk.level,
+    riskFactors: risk.factors,
+    approvalRequired: routing.required,
+    approvalReason: routing.reason,
+    explain: { margin: margin.explain, risk: risk.explain, routing: routing.explain },
   };
 }
 
