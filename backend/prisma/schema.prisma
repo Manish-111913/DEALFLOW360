@@ -1,0 +1,1324 @@
+// DealFlow360 — database schema
+//
+// Source of truth for the implemented database. Checked against
+// 02_DATA_MODEL.md and bound by 07_FINAL_IMPLEMENTATION_DECISIONS.md:
+//
+//   D2  money is Decimal end to end — never Float, anywhere
+//   D3  timestamps are written from currentBusinessTime(); no @default(now())
+//   D4  FulfillmentPlan (advisory) is separate from FulfillmentAllocation
+//   D5  QuotationVersion is append-only; the last approved one is the snapshot
+//   D9  shipment count and cost are order-level, not per line
+//   D10 discount ceiling: category policy -> tier default -> global default
+//   D11 approval thresholds are configurable, never hardcoded
+//   D19 AuditLog is append-only and hash-chained, enforced by a DB trigger
+//   D24 single currency: modelled and displayed, never converted
+//
+// Numeric conventions:
+//   money       Decimal(14,2)
+//   percentage  Decimal(5,2)   — feeds money maths, so not Float
+//   rate 0..1   Decimal(5,4)
+//   scores      Decimal(5,2) / Int — deterministic, so a demoed number never drifts
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ===========================================================================
+// AUTH & USERS
+// ===========================================================================
+
+/// Internal users hold a Role. Portal users hold a customerId instead.
+/// Never both — enforced by a CHECK constraint (see migration).
+enum UserKind {
+  INTERNAL
+  PORTAL
+}
+
+/// Single-valued deliberately. The roles are mutually exclusive, and the
+/// capability matrix in authz/roles.ts assumes exactly one.
+enum Role {
+  SALES_REP
+  SALES_MANAGER
+  FINANCE_OPS
+  ADMIN
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  kind         UserKind
+  /// Set only when kind = INTERNAL.
+  role         Role?
+  /// Set only when kind = PORTAL.
+  customerId   String?
+  /// Portal users may authenticate by magic link alone, so this stays nullable.
+  passwordHash String?
+  active       Boolean  @default(true)
+  createdAt    DateTime
+  updatedAt    DateTime
+
+  /// Sales team membership drives the Sales Manager data scope (D6).
+  salesTeamId String?
+  salesTeam   SalesTeam? @relation("TeamMembers", fields: [salesTeamId], references: [id])
+  managedTeam SalesTeam? @relation("TeamManager")
+
+  customer            Customer?         @relation("PortalUsers", fields: [customerId], references: [id])
+  sessions            Session[]
+  accounts            Account[]
+  auditLogs           AuditLog[]
+  assignedCustomers   Customer[]        @relation("AccountOwner")
+  quotations          Quotation[]       @relation("SalesRep")
+  quotationVersions   QuotationVersion[]
+  approvalRequests    ApprovalRequest[] @relation("Assignee")
+  approvalDecisions   ApprovalRequest[] @relation("Decider")
+  negotiationComments NegotiationComment[]
+
+  @@index([kind])
+  @@index([customerId])
+  @@index([salesTeamId])
+}
+
+model SalesTeam {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  managerId String?  @unique
+  manager   User?    @relation("TeamManager", fields: [managerId], references: [id])
+  members   User[]   @relation("TeamMembers")
+  createdAt DateTime
+  updatedAt DateTime
+}
+
+// ===========================================================================
+// AUTH.JS ADAPTER
+// ===========================================================================
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+/// D18 — one row per issued portal magic link. The raw token is never stored,
+/// only its SHA-256, so a database read cannot be replayed as a login.
+model PortalAccessToken {
+  id         String    @id @default(cuid())
+  customerId String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  /// Set on first successful use. A second use is refused (single-use links).
+  consumedAt DateTime?
+  createdAt  DateTime
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([expiresAt])
+}
+
+// ===========================================================================
+// CUSTOMER
+// ===========================================================================
+
+enum CustomerTier {
+  BRONZE
+  SILVER
+  GOLD
+}
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Customer {
+  id          String         @id @default(cuid())
+  name        String         @unique
+  contactName String?
+  email       String?
+  phone       String?
+  /// Deliberately nullable with no default: an admin must set a tier
+  /// explicitly, because a tier-less customer would silently skip ceiling checks.
+  tier        CustomerTier?
+  /// D24 — single currency. Stored and displayed, never converted.
+  currency    String         @default("INR")
+  status      CustomerStatus @default(ACTIVE)
+
+  assignedSalesRepId String?
+  assignedSalesRep   User?   @relation("AccountOwner", fields: [assignedSalesRepId], references: [id])
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  portalUsers   User[]              @relation("PortalUsers")
+  portalTokens  PortalAccessToken[]
+  quotations    Quotation[]
+  subscriptions Subscription[]
+  invoices      Invoice[]
+  negotiations  Negotiation[]
+
+  @@index([tier])
+  @@index([assignedSalesRepId])
+}
+
+// ===========================================================================
+// PRODUCT & PRICING
+// ===========================================================================
+
+enum ProductType {
+  PRODUCT
+  SERVICE
+  SUBSCRIPTION
+}
+
+model ProductCategory {
+  id          String  @id @default(cuid())
+  name        String  @unique
+  description String?
+
+  products         Product[]
+  discountPolicies DiscountPolicy[]
+}
+
+/// Tax is stored and applied to invoices, but is deliberately absent from the
+/// margin formula: margin = (subtotal - discount) - cost. Tax is collected on
+/// behalf of the state, so it is neither revenue nor margin.
+model Tax {
+  id         String  @id @default(cuid())
+  name       String  @unique
+  percentage Decimal @db.Decimal(5, 2)
+  isActive   Boolean @default(true)
+
+  products Product[]
+}
+
+model Product {
+  id          String      @id @default(cuid())
+  sku         String      @unique
+  name        String
+  description String?
+  categoryId  String
+  type        ProductType
+  /// List price before any price list or discount.
+  basePrice   Decimal     @db.Decimal(14, 2)
+  /// Feeds the margin engine. Without it margin cannot be computed at all.
+  costPrice   Decimal     @db.Decimal(14, 2)
+  unit        String      @default("unit")
+  taxId       String?
+  isActive    Boolean     @default(true)
+  /// A6 — promoted products rank higher in upsell suggestions.
+  isPromoted  Boolean     @default(false)
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  category           ProductCategory @relation(fields: [categoryId], references: [id])
+  tax                Tax?            @relation(fields: [taxId], references: [id])
+  variants           ProductVariant[]
+  priceListItems     PriceListItem[]
+  quotationLines     QuotationLine[]
+  warehouseStock     WarehouseStock[]
+  pairingsAsBase     ProductPairing[] @relation("BaseProduct")
+  pairingsAsSuggested ProductPairing[] @relation("SuggestedProduct")
+  upsellSuggestions  UpsellRecommendation[]
+  subscriptionPlans  SubscriptionPlan[]
+
+  @@index([categoryId])
+  @@index([type])
+}
+
+/// A2 requires variants with an attribute, a value and an extra price.
+model ProductVariant {
+  id             String  @id @default(cuid())
+  productId      String
+  sku            String  @unique
+  attributeName  String
+  attributeValue String
+  extraPrice     Decimal @default(0) @db.Decimal(14, 2)
+  isActive       Boolean @default(true)
+
+  product        Product          @relation(fields: [productId], references: [id], onDelete: Cascade)
+  priceListItems PriceListItem[]
+  quotationLines QuotationLine[]
+  warehouseStock WarehouseStock[]
+
+  @@index([productId])
+}
+
+/// A2 — tier-based pricing. Distinct from the discount ceiling in A3: this sets
+/// what a customer is charged; that limits how far a rep may discount it.
+model PriceList {
+  id       String        @id @default(cuid())
+  name     String        @unique
+  tier     CustomerTier?
+  currency String        @default("INR")
+  isActive Boolean       @default(true)
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  items PriceListItem[]
+
+  @@index([tier])
+}
+
+model PriceListItem {
+  id          String  @id @default(cuid())
+  priceListId String
+  productId   String
+  variantId   String?
+  price       Decimal @db.Decimal(14, 2)
+  minQuantity Int     @default(1)
+  maxQuantity Int?
+
+  priceList PriceList       @relation(fields: [priceListId], references: [id], onDelete: Cascade)
+  product   Product         @relation(fields: [productId], references: [id])
+  variant   ProductVariant? @relation(fields: [variantId], references: [id])
+
+  @@unique([priceListId, productId, variantId, minQuantity])
+  @@index([productId])
+}
+
+// ===========================================================================
+// QUOTATION — the spine of the system
+// ===========================================================================
+
+/// The rep's view of where the deal is.
+enum QuotationStatus {
+  DRAFT
+  SENT
+  CONFIRMED
+  CANCELLED
+}
+
+/// The governance state machine. Never shown to a customer.
+enum ApprovalState {
+  NONE
+  PENDING_MANAGER
+  PENDING_FINANCE
+  APPROVED
+  REJECTED
+  RETURNED
+}
+
+/// B8 — the customer-facing vocabulary, deliberately separate from the two
+/// above. A customer sees "Under Negotiation", never "PENDING_FINANCE".
+enum PortalStatus {
+  NOT_SHARED
+  SENT
+  UNDER_NEGOTIATION
+  CONFIRMED
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Quotation {
+  id          String @id @default(cuid())
+  quoteNumber String @unique
+  customerId  String
+  salesRepId  String
+
+  status        QuotationStatus @default(DRAFT)
+  approvalState ApprovalState   @default(NONE)
+  portalStatus  PortalStatus    @default(NOT_SHARED)
+  currency      String          @default("INR")
+
+  subtotal       Decimal @default(0) @db.Decimal(14, 2)
+  discountAmount Decimal @default(0) @db.Decimal(14, 2)
+  taxAmount      Decimal @default(0) @db.Decimal(14, 2)
+  totalAmount    Decimal @default(0) @db.Decimal(14, 2)
+
+  totalCost         Decimal @default(0) @db.Decimal(14, 2)
+  grossMargin       Decimal @default(0) @db.Decimal(14, 2)
+  marginPercentage  Decimal @default(0) @db.Decimal(5, 2)
+
+  /// 0..100. Decimal rather than Float so a demoed score never drifts.
+  riskScore Decimal   @default(0) @db.Decimal(5, 2)
+  riskLevel RiskLevel @default(LOW)
+
+  /// Incremented per accepted negotiation; feeds the risk and health engines.
+  negotiationCount Int @default(0)
+
+  /// Last meaningful activity, for the stalled-deal penalty.
+  lastActivityAt DateTime
+  validUntil     DateTime?
+
+  createdAt   DateTime
+  updatedAt   DateTime
+  submittedAt DateTime?
+  approvedAt  DateTime?
+  confirmedAt DateTime?
+
+  customer Customer @relation(fields: [customerId], references: [id])
+  salesRep User     @relation("SalesRep", fields: [salesRepId], references: [id])
+
+  lines            QuotationLine[]
+  versions         QuotationVersion[]
+  riskFactors      RiskFactor[]
+  approvalRequests ApprovalRequest[]
+  upsells          UpsellRecommendation[]
+  fulfillmentPlans FulfillmentPlan[]
+  allocations      FulfillmentAllocation[]
+  shipments        Shipment[]
+  backorders       Backorder[]
+  subscriptions    Subscription[]
+  invoices         Invoice[]
+  negotiations     Negotiation[]
+  healthSnapshots  DealHealthSnapshot[]
+  alerts           DealAlert[]
+
+  @@index([customerId])
+  @@index([salesRepId])
+  @@index([approvalState])
+  @@index([status])
+  @@index([lastActivityAt])
+}
+
+model QuotationLine {
+  id          String  @id @default(cuid())
+  quotationId String
+  productId   String
+  variantId   String?
+  sequence    Int     @default(0)
+
+  quantity           Int
+  unitPrice          Decimal @db.Decimal(14, 2)
+  discountPercentage Decimal @default(0) @db.Decimal(5, 2)
+  discountAmount     Decimal @default(0) @db.Decimal(14, 2)
+
+  taxPercentage Decimal @default(0) @db.Decimal(5, 2)
+  taxAmount     Decimal @default(0) @db.Decimal(14, 2)
+
+  unitCost     Decimal @db.Decimal(14, 2)
+  lineSubtotal Decimal @default(0) @db.Decimal(14, 2)
+  lineTotal    Decimal @default(0) @db.Decimal(14, 2)
+
+  marginAmount     Decimal @default(0) @db.Decimal(14, 2)
+  marginPercentage Decimal @default(0) @db.Decimal(5, 2)
+
+  /// D10 — resolved ceiling: category policy, else tier default, else global.
+  /// Stored so the UI flags a breach against the same number the engine checks.
+  discountCeiling Decimal @default(0) @db.Decimal(5, 2)
+  /// Excess over the ceiling in percentage points; 0 when within it.
+  violationPoints Decimal @default(0) @db.Decimal(5, 2)
+
+  isUpsell           Boolean @default(false)
+  isRecurring        Boolean @default(false)
+  subscriptionPlanId String?
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  quotation        Quotation         @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  product          Product           @relation(fields: [productId], references: [id])
+  variant          ProductVariant?   @relation(fields: [variantId], references: [id])
+  subscriptionPlan SubscriptionPlan? @relation(fields: [subscriptionPlanId], references: [id])
+
+  allocations        FulfillmentAllocation[]
+  backorders         Backorder[]
+  invoiceLines       InvoiceLine[]
+  subscriptions      Subscription[]
+  negotiationRequests NegotiationRequest[]
+  negotiationComments NegotiationComment[]
+
+  @@index([quotationId])
+  @@index([productId])
+}
+
+/// D5 — append-only snapshots. The most recent row with approvedAt set is the
+/// "last approved snapshot" a negotiation what-if is evaluated against, rather
+/// than a separate JSON blob that can drift from what it mirrors.
+model QuotationVersion {
+  id            String @id @default(cuid())
+  quotationId   String
+  versionNumber Int
+  createdById   String?
+  reason        String?
+
+  subtotal         Decimal @db.Decimal(14, 2)
+  discountAmount   Decimal @db.Decimal(14, 2)
+  totalAmount      Decimal @db.Decimal(14, 2)
+  totalCost        Decimal @db.Decimal(14, 2)
+  grossMargin      Decimal @db.Decimal(14, 2)
+  marginPercentage Decimal @db.Decimal(5, 2)
+  riskScore        Decimal @db.Decimal(5, 2)
+
+  /// Full line state at this version, so a diff needs no other table.
+  lineSnapshot Json
+
+  /// Set when this version is the one a reviewer approved.
+  approvedAt DateTime?
+  createdAt  DateTime
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  createdBy User?     @relation(fields: [createdById], references: [id])
+
+  @@unique([quotationId, versionNumber])
+  @@index([quotationId, approvedAt])
+}
+
+// ===========================================================================
+// DISCOUNT GOVERNANCE & APPROVAL
+// ===========================================================================
+
+/// D10 step two — the tier-level default ceiling (Bronze 5, Silver 10, Gold 15).
+/// Without this, a product whose category has no policy row has no ceiling.
+model DiscountTier {
+  id                 String       @id @default(cuid())
+  tier               CustomerTier @unique
+  defaultMaxDiscount Decimal      @db.Decimal(5, 2)
+  priority           Int          @default(0)
+  isActive           Boolean      @default(true)
+
+  createdAt DateTime
+  updatedAt DateTime
+}
+
+/// D10 step one — the category-specific override, e.g. Gold/Services = 10%
+/// even though Gold's tier default is 15%.
+model DiscountPolicy {
+  id            String       @id @default(cuid())
+  tier          CustomerTier
+  categoryId    String
+  maxDiscount   Decimal      @db.Decimal(5, 2)
+  isActive      Boolean      @default(true)
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  category ProductCategory @relation(fields: [categoryId], references: [id])
+
+  // Uniqueness is enforced only over active rows, by a partial index in the
+  // migration. A plain unique key would make the documented
+  // deactivate-then-replace workflow impossible, since the old row keeps the key.
+  @@index([tier, categoryId])
+}
+
+/// D11 — the approval chain is configuration, not an if-statement. Seeded to
+/// reproduce the 30/60 behaviour so the frozen worked examples still hold.
+model ApprovalChain {
+  id        String  @id @default(cuid())
+  name      String  @unique
+  isActive  Boolean @default(true)
+  createdAt DateTime
+  updatedAt DateTime
+
+  steps ApprovalStep[]
+}
+
+model ApprovalStep {
+  id              String @id @default(cuid())
+  approvalChainId String
+  stepOrder       Int
+  approverRole    Role
+
+  minRiskScore Decimal? @db.Decimal(5, 2)
+  maxRiskScore Decimal? @db.Decimal(5, 2)
+  minDiscount  Decimal? @db.Decimal(5, 2)
+  maxDiscount  Decimal? @db.Decimal(5, 2)
+
+  chain    ApprovalChain     @relation(fields: [approvalChainId], references: [id], onDelete: Cascade)
+  requests ApprovalRequest[]
+
+  @@unique([approvalChainId, stepOrder])
+}
+
+enum ApprovalRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  RETURNED
+}
+
+/// One row per review. The decision lives here rather than in a separate
+/// action table: there is exactly one decision per request, and splitting them
+/// invites the duplicate-approval bug the design notes warn about.
+model ApprovalRequest {
+  id          String @id @default(cuid())
+  quotationId String
+  stepId      String
+
+  status       ApprovalRequestStatus @default(PENDING)
+  assignedToId String?
+
+  riskScore     Decimal @db.Decimal(5, 2)
+  triggerReason String
+
+  decidedById String?
+  /// Required when the decision is REJECTED or RETURNED.
+  decisionReason String?
+
+  requestedAt DateTime
+  actedAt     DateTime?
+
+  quotation  Quotation    @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  step       ApprovalStep @relation(fields: [stepId], references: [id])
+  assignedTo User?        @relation("Assignee", fields: [assignedToId], references: [id])
+  decidedBy  User?        @relation("Decider", fields: [decidedById], references: [id])
+
+  @@index([quotationId])
+  @@index([status])
+  @@index([assignedToId])
+}
+
+/// D22 — the risk score as a list of contributors rather than a bare number.
+/// Rewritten on every recompute, so this always explains the current score.
+/// `formula` carries the arithmetic ("8.0 pts excess x 2.5 = 20") so the UI can
+/// show the derivation instead of just "+20".
+enum RiskFactorSource {
+  CATEGORY_VIOLATION
+  DEVIATION_BREADTH
+  MARGIN_EXPOSURE
+  REPEATED_NEGOTIATION
+  DELIVERY_RISK
+}
+
+model RiskFactor {
+  id          String           @id @default(cuid())
+  quotationId String
+  source      RiskFactorSource
+  points      Decimal          @db.Decimal(5, 2)
+  description String
+  formula     String
+  sequence    Int              @default(0)
+  createdAt   DateTime
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+
+  @@index([quotationId])
+}
+
+// ===========================================================================
+// UPSELL / CROSS-SELL
+// ===========================================================================
+
+/// D14 — coPurchaseRate is derived from confirmed order history by a job.
+/// configuredRate is an optional admin override, not the source of truth.
+model ProductPairing {
+  id                  String  @id @default(cuid())
+  baseProductId       String
+  suggestedProductId  String
+  coPurchaseRate      Decimal @default(0) @db.Decimal(5, 4)
+  configuredRate      Decimal? @db.Decimal(5, 4)
+  /// A suggestion below this margin never surfaces, however well it pairs.
+  minMarginPercentage Decimal @default(0) @db.Decimal(5, 2)
+  priority            Int     @default(0)
+  isActive            Boolean @default(true)
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  baseProduct      Product @relation("BaseProduct", fields: [baseProductId], references: [id], onDelete: Cascade)
+  suggestedProduct Product @relation("SuggestedProduct", fields: [suggestedProductId], references: [id], onDelete: Cascade)
+
+  @@unique([baseProductId, suggestedProductId])
+}
+
+enum UpsellStatus {
+  SUGGESTED
+  ACCEPTED
+  DISMISSED
+}
+
+/// Persisted so accept/dismiss is measurable, and so the demo can show that a
+/// suggestion was grounded in data rather than generated on the spot.
+model UpsellRecommendation {
+  id          String @id @default(cuid())
+  quotationId String
+  productId   String
+
+  score       Decimal @db.Decimal(5, 4)
+  marginDelta Decimal @db.Decimal(14, 2)
+  /// Human-readable grounding, e.g. "72% of similar orders include this".
+  reason      String
+
+  status    UpsellStatus @default(SUGGESTED)
+  createdAt DateTime
+  actedAt   DateTime?
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  product   Product   @relation(fields: [productId], references: [id])
+
+  @@index([quotationId])
+}
+
+// ===========================================================================
+// WAREHOUSE & FULFILLMENT
+// ===========================================================================
+
+model Warehouse {
+  id       String  @id @default(cuid())
+  name     String  @unique
+  code     String  @unique
+  address  String?
+  /// A4 — admin-configurable. Never hardcoded priority.
+  priority Int     @default(0)
+  /// Cost of one shipment from this warehouse, used by the allocator.
+  shippingCost Decimal @default(0) @db.Decimal(14, 2)
+  isActive Boolean @default(true)
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  stock       WarehouseStock[]
+  allocations FulfillmentAllocation[]
+  shipments   Shipment[]
+  backorders  Backorder[]
+}
+
+/// A4 also requires replenishment rules per warehouse, which is why the reorder
+/// columns live here rather than on Product.
+model WarehouseStock {
+  id          String  @id @default(cuid())
+  warehouseId String
+  productId   String
+  variantId   String?
+
+  availableQuantity Int @default(0)
+  /// Held for approved-and-confirmed orders. Allocation is transactional
+  /// (SELECT ... FOR UPDATE) so two orders cannot claim the same last units.
+  reservedQuantity  Int @default(0)
+  reorderLevel      Int @default(0)
+  reorderQuantity   Int @default(0)
+
+  updatedAt DateTime
+
+  warehouse Warehouse       @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  product   Product         @relation(fields: [productId], references: [id])
+  variant   ProductVariant? @relation(fields: [variantId], references: [id])
+
+  @@unique([warehouseId, productId, variantId])
+  @@index([productId])
+}
+
+enum FulfillmentPlanStatus {
+  RECOMMENDED
+  ALTERNATIVE
+  ACCEPTED
+  SUPERSEDED
+}
+
+/// D4 — advisory only. Reserves nothing, may be regenerated on every line edit,
+/// and carries a stock-snapshot timestamp so the UI can say "as of 14:32".
+///
+/// D8 — the allocator keeps the runner-up plan as an ALTERNATIVE row, which is
+/// what lets the fulfilment screen show the shipment-count/cost trade-off
+/// rather than a single take-it-or-leave-it answer.
+///
+/// D9 — shipment count and cost are recorded here, at order level, because a
+/// warehouse used by three lines is still one shipment.
+model FulfillmentPlan {
+  id          String                @id @default(cuid())
+  quotationId String
+  status      FulfillmentPlanStatus @default(RECOMMENDED)
+
+  estimatedShipmentCount Int
+  estimatedShippingCost  Decimal @db.Decimal(14, 2)
+  /// True for the plan the allocator ranked second, kept for comparison.
+  isRunnerUp             Boolean @default(false)
+  /// Explains the ranking, e.g. "1 shipment from East Depot, +2 days".
+  rationale              String?
+
+  /// Stock state this plan was computed against; it can go stale.
+  stockSnapshotAt DateTime
+  createdAt       DateTime
+
+  quotation Quotation            @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  lines     FulfillmentPlanLine[]
+
+  @@index([quotationId])
+}
+
+model FulfillmentPlanLine {
+  id              String @id @default(cuid())
+  planId          String
+  quotationLineId String
+  warehouseId     String
+  quantity        Int
+
+  plan FulfillmentPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@index([planId])
+}
+
+enum AllocationStatus {
+  RESERVED
+  SHIPPED
+  CANCELLED
+}
+
+/// D4 — the authoritative record. Written only after approval and confirmation,
+/// against freshly re-read stock, inside a transaction that reserves it.
+model FulfillmentAllocation {
+  id              String @id @default(cuid())
+  quotationId     String
+  quotationLineId String
+  warehouseId     String
+
+  requestedQuantity Int
+  allocatedQuantity Int
+  backorderQuantity Int @default(0)
+
+  status    AllocationStatus @default(RESERVED)
+  /// True when a human replaced the recommendation, so the audit trail can
+  /// distinguish a system decision from a person's.
+  isManualOverride Boolean @default(false)
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  quotation     Quotation     @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  quotationLine QuotationLine @relation(fields: [quotationLineId], references: [id], onDelete: Cascade)
+  warehouse     Warehouse     @relation(fields: [warehouseId], references: [id])
+
+  @@index([quotationId])
+  @@index([warehouseId])
+}
+
+enum ShipmentStatus {
+  PENDING
+  DISPATCHED
+  DELIVERED
+  CANCELLED
+}
+
+model Shipment {
+  id             String         @id @default(cuid())
+  shipmentNumber String         @unique
+  quotationId    String
+  warehouseId    String
+  status         ShipmentStatus @default(PENDING)
+  shippingCost   Decimal        @db.Decimal(14, 2)
+
+  /// Promised vs actual is what the delivery-slippage signal compares.
+  estimatedDeliveryDate DateTime?
+  actualDeliveryDate    DateTime?
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+
+  @@index([quotationId])
+}
+
+enum BackorderStatus {
+  OPEN
+  CONSOLIDATED
+  FULFILLED
+  CANCELLED
+}
+
+model Backorder {
+  id              String          @id @default(cuid())
+  quotationId     String
+  quotationLineId String
+  warehouseId     String?
+  quantity        Int
+  status          BackorderStatus @default(OPEN)
+  expectedDate    DateTime?
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  quotation     Quotation     @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  quotationLine QuotationLine @relation(fields: [quotationLineId], references: [id], onDelete: Cascade)
+  warehouse     Warehouse?    @relation(fields: [warehouseId], references: [id])
+
+  @@index([quotationId])
+  @@index([status])
+}
+
+// ===========================================================================
+// SUBSCRIPTION & BILLING
+// ===========================================================================
+
+enum BillingInterval {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
+model SubscriptionPlan {
+  id              String          @id @default(cuid())
+  name            String          @unique
+  productId       String?
+  billingInterval BillingInterval
+  price           Decimal         @db.Decimal(14, 2)
+  /// Configurable per A5 rather than hardcoded in the billing engine.
+  prorationRule    String  @default("DAILY_CALENDAR")
+  cancellationRule String  @default("PRORATA_CREDIT")
+  refundRule       String  @default("NO_REFUND_FOR_CONSUMED")
+  isActive         Boolean @default(true)
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  product        Product?        @relation(fields: [productId], references: [id])
+  subscriptions  Subscription[]
+  quotationLines QuotationLine[]
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAUSED
+  CANCELLED
+}
+
+model Subscription {
+  id              String @id @default(cuid())
+  quotationId     String
+  quotationLineId String?
+  customerId      String
+  planId          String
+
+  status   SubscriptionStatus @default(ACTIVE)
+  quantity Int                @default(1)
+  /// Unit price at the time of sale; the plan's price may change later.
+  currentPrice Decimal @db.Decimal(14, 2)
+
+  startDate       DateTime
+  endDate         DateTime?
+  nextBillingDate DateTime?
+  cancelledAt     DateTime?
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  quotation     Quotation        @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  quotationLine QuotationLine?   @relation(fields: [quotationLineId], references: [id])
+  customer      Customer         @relation(fields: [customerId], references: [id])
+  plan          SubscriptionPlan @relation(fields: [planId], references: [id])
+
+  schedules   BillingSchedule[]
+  creditNotes CreditNote[]
+
+  @@index([quotationId])
+  @@index([customerId])
+  @@index([nextBillingDate])
+}
+
+enum BillingScheduleStatus {
+  SCHEDULED
+  INVOICED
+  SKIPPED
+  CANCELLED
+}
+
+/// Materialised forward, rather than computed on demand. That makes the
+/// "upcoming billing schedule" screen a plain table read, and turns proration
+/// and cancellation into edits of future rows instead of re-derivations.
+model BillingSchedule {
+  id             String                @id @default(cuid())
+  subscriptionId String
+  periodStart    DateTime
+  periodEnd      DateTime
+  billingDate    DateTime
+  amount         Decimal               @db.Decimal(14, 2)
+  status         BillingScheduleStatus @default(SCHEDULED)
+  /// Explains a non-standard amount, e.g. "16 of 30 days, prorated".
+  prorationNote  String?
+  invoiceId      String?
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  invoice      Invoice?     @relation(fields: [invoiceId], references: [id])
+
+  @@index([subscriptionId])
+  @@index([billingDate, status])
+}
+
+enum InvoiceType {
+  ONE_TIME
+  RECURRING
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+}
+
+model Invoice {
+  id            String        @id @default(cuid())
+  invoiceNumber String        @unique
+  quotationId   String
+  customerId    String
+  invoiceType   InvoiceType
+  status        InvoiceStatus @default(DRAFT)
+  currency      String        @default("INR")
+
+  subtotal   Decimal @default(0) @db.Decimal(14, 2)
+  taxAmount  Decimal @default(0) @db.Decimal(14, 2)
+  total      Decimal @default(0) @db.Decimal(14, 2)
+  paidAmount Decimal @default(0) @db.Decimal(14, 2)
+  dueAmount  Decimal @default(0) @db.Decimal(14, 2)
+
+  issueDate DateTime
+  dueDate   DateTime?
+
+  createdAt DateTime
+  updatedAt DateTime
+
+  quotation Quotation @relation(fields: [quotationId], references: [id])
+  customer  Customer  @relation(fields: [customerId], references: [id])
+
+  lines       InvoiceLine[]
+  payments    Payment[]
+  creditNotes CreditNote[]
+  schedules   BillingSchedule[]
+
+  @@index([quotationId])
+  @@index([customerId])
+  @@index([status])
+}
+
+model InvoiceLine {
+  id              String  @id @default(cuid())
+  invoiceId       String
+  quotationLineId String?
+  description     String
+  quantity        Int
+  unitPrice       Decimal @db.Decimal(14, 2)
+  taxAmount       Decimal @default(0) @db.Decimal(14, 2)
+  amount          Decimal @db.Decimal(14, 2)
+
+  invoice       Invoice        @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  quotationLine QuotationLine? @relation(fields: [quotationLineId], references: [id])
+
+  @@index([invoiceId])
+}
+
+enum PaymentMethod {
+  BANK_TRANSFER
+  CARD
+  CASH
+  CHEQUE
+  OTHER
+}
+
+enum PaymentStatus {
+  RECORDED
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id        String        @id @default(cuid())
+  invoiceId String
+  amount    Decimal       @db.Decimal(14, 2)
+  method    PaymentMethod @default(BANK_TRANSFER)
+  reference String?
+  status    PaymentStatus @default(RECORDED)
+  paidAt    DateTime
+
+  createdAt DateTime
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+}
+
+enum CreditNoteStatus {
+  DRAFT
+  ISSUED
+  APPLIED
+}
+
+/// Covers cancellation refunds. A separate Refund entity would duplicate this:
+/// the business rules issue a pro-rata credit note, never a cash refund.
+model CreditNote {
+  id               String           @id @default(cuid())
+  creditNoteNumber String           @unique
+  invoiceId        String?
+  subscriptionId   String?
+  amount           Decimal          @db.Decimal(14, 2)
+  reason           String
+  status           CreditNoteStatus @default(ISSUED)
+  issuedAt         DateTime
+
+  createdAt DateTime
+
+  invoice      Invoice?      @relation(fields: [invoiceId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@index([invoiceId])
+  @@index([subscriptionId])
+}
+
+// ===========================================================================
+// CUSTOMER NEGOTIATION
+// ===========================================================================
+
+enum NegotiationStatus {
+  OPEN
+  CLOSED
+}
+
+model Negotiation {
+  id          String            @id @default(cuid())
+  quotationId String
+  customerId  String
+  status      NegotiationStatus @default(OPEN)
+  startedAt   DateTime
+  closedAt    DateTime?
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  customer  Customer  @relation(fields: [customerId], references: [id])
+
+  requests NegotiationRequest[]
+  comments NegotiationComment[]
+
+  @@index([quotationId])
+}
+
+enum NegotiationRequestType {
+  COUNTER_DISCOUNT
+  QUANTITY_CHANGE
+  QUESTION
+  OTHER
+}
+
+enum NegotiationRequestStatus {
+  SUBMITTED
+  ACCEPTED_NO_REAPPROVAL
+  ACCEPTED_PENDING_APPROVAL
+  REJECTED
+}
+
+model NegotiationRequest {
+  id              String  @id @default(cuid())
+  negotiationId   String
+  quotationLineId String?
+
+  requestType    NegotiationRequestType
+  /// The proposed value, e.g. a counter discount percentage.
+  requestedValue Decimal?               @db.Decimal(14, 2)
+  reason         String?
+
+  status NegotiationRequestStatus @default(SUBMITTED)
+
+  createdAt DateTime
+  resolvedAt DateTime?
+
+  negotiation   Negotiation    @relation(fields: [negotiationId], references: [id], onDelete: Cascade)
+  quotationLine QuotationLine? @relation(fields: [quotationLineId], references: [id])
+
+  @@index([negotiationId])
+}
+
+/// Customer-visible thread. Internal notes never live here — a portal user can
+/// read this table's rows for their own quotation.
+model NegotiationComment {
+  id              String  @id @default(cuid())
+  negotiationId   String
+  quotationLineId String?
+  authorId        String?
+  message         String
+  createdAt       DateTime
+
+  negotiation   Negotiation    @relation(fields: [negotiationId], references: [id], onDelete: Cascade)
+  quotationLine QuotationLine? @relation(fields: [quotationLineId], references: [id])
+  author        User?          @relation(fields: [authorId], references: [id])
+
+  @@index([negotiationId])
+}
+
+// ===========================================================================
+// DEAL HEALTH
+// ===========================================================================
+
+enum DealSeverity {
+  HEALTHY
+  WATCH
+  AT_RISK
+  CRITICAL
+}
+
+/// Kept as history rather than overwritten, so a manager sees a trend rather
+/// than only the current state.
+model DealHealthSnapshot {
+  id          String @id @default(cuid())
+  quotationId String
+
+  riskScore   Decimal      @db.Decimal(5, 2)
+  healthScore Int
+  severity    DealSeverity
+
+  stalledPenalty        Int @default(0)
+  approvalDelayPenalty  Int @default(0)
+  negotiationPenalty    Int @default(0)
+  deliveryPenalty       Int @default(0)
+  discountAnomalyPenalty Int @default(0)
+
+  stalledDays      Int @default(0)
+  negotiationCount Int @default(0)
+
+  /// The actionable next step, not just a number.
+  recommendedAction String
+  computedAt        DateTime
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+
+  @@index([quotationId, computedAt])
+}
+
+enum AlertType {
+  STALLED
+  DISCOUNT_ANOMALY
+  DELIVERY_SLIPPAGE
+  APPROVAL_DELAY
+}
+
+enum AlertStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+model DealAlert {
+  id          String       @id @default(cuid())
+  quotationId String
+  type        AlertType
+  severity    DealSeverity
+  message     String
+  status      AlertStatus  @default(OPEN)
+
+  createdAt  DateTime
+  resolvedAt DateTime?
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+
+  @@index([quotationId])
+  @@index([status])
+}
+
+// ===========================================================================
+// AUDIT
+// ===========================================================================
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE
+  REJECT
+  RETURN
+  NEGOTIATE
+  ALLOCATE
+  OVERRIDE
+  CONFIRM
+  INVOICE
+  PAYMENT
+  CREDIT_NOTE
+  CONFIGURE
+  LOGIN
+}
+
+/// D19 — append-only and hash-chained. There is no update or delete path in the
+/// application, and a database trigger refuses both regardless of caller.
+model AuditLog {
+  /// Chain position. The hash of row N covers the hash of row N-1.
+  seq          Int         @id @default(autoincrement())
+  entityName   String
+  entityId     String
+  action       AuditAction
+  actorId      String?
+  reason       String?
+  /// JSON before/after pairs. Empty for self-explanatory actions.
+  fieldChanges Json?
+  ipAddress    String?
+  /// Written from currentBusinessTime() (D3), never a database default.
+  timestamp    DateTime
+  prevHash     String
+  hash         String      @unique
+
+  /// Restrict, not SetNull: nulling the actor would be an UPDATE, which the
+  /// immutability trigger refuses anyway. Stating it as Restrict makes the real
+  /// rule explicit — an actor with history is deactivated, never deleted.
+  actor User? @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([entityName, entityId])
+  @@index([actorId])
+}
+
+// ===========================================================================
+// SYSTEM CONFIGURATION
+// ===========================================================================
+
+/// Admin-editable configuration that would otherwise be constants in the code.
+///
+/// The test for belonging here is "would a deployment reasonably need this
+/// different, without a code change?" — currency and its precision, document
+/// number formats, the company's target margin. Arithmetic (percent is /100)
+/// and security policy (the role matrix) deliberately stay in code, where they
+/// can be reviewed and tested rather than misconfigured.
+model SystemSetting {
+  key         String   @id
+  value       String
+  description String?
+  updatedAt   DateTime
+  updatedBy   String?
+}
+
+// ===========================================================================
+// APPLICATION CLOCK (D3)
+// ===========================================================================
+
+/// Single-row table holding the demo time offset. Persisted rather than held in
+/// memory so a demo survives a server restart mid-run.
+model ClockOffset {
+  id             Int      @id @default(1)
+  /// Milliseconds added to real wall-clock time by currentBusinessTime().
+  offsetMs       BigInt   @default(0)
+  updatedAt      DateTime
+  updatedByEmail String?
+}

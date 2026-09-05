@@ -1,0 +1,33 @@
+{
+  "name": "dealflow360",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @dealflow/frontend",
+    "build": "npm run build -w @dealflow/frontend",
+    "start": "npm run start -w @dealflow/frontend",
+    "test": "npm run test -w @dealflow/backend",
+    "lint": "eslint .",
+    "typecheck": "npm run typecheck -w @dealflow/backend && npm run typecheck -w @dealflow/frontend",
+    "db:generate": "npm run db:generate -w @dealflow/backend",
+    "db:migrate": "npm run db:migrate -w @dealflow/backend",
+    "db:reset": "npm run db:reset -w @dealflow/backend",
+    "db:seed": "npm run db:seed -w @dealflow/backend",
+    "db:studio": "npm run db:studio -w @dealflow/backend"
+  },
+  "devDependencies": {
+    "eslint": "^9",
+    "eslint-config-next": "16.3.4",
+    "typescript": "^5"
+  },
+  "allowScripts": {
+    "prisma@7.10.0": true,
+    "@prisma/engines@7.10.0": true,
+    "esbuild@0.28.2": true,
+    "unrs-resolver@1.12.2": true
+  }
+}
