@@ -146,7 +146,7 @@ describe("the frozen scenario scores 44 against real data", () => {
 
   it("persists the breakdown so the approval screen can show it", async () => {
     const { quotationId } = await acmeScenario({ negotiationRounds: 1, split: true });
-    const overview = await getApprovalOverview(quotationId);
+    const overview = await getApprovalOverview(manager, quotationId);
 
     expect(overview.riskScore).toBe(44);
     expect(overview.factors).toHaveLength(5);

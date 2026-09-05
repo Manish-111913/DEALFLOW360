@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Role } from "../generated/prisma/enums";
 import { appendAudit } from "../audit";
 import { hashPassword } from "./password";
+import { passwordSchema } from "./password-policy";
 import { currentBusinessTime } from "../clock";
 import { prisma } from "../db";
 
@@ -14,8 +15,10 @@ import { prisma } from "../db";
 export const internalSignupSchema = z.object({
   email: z.string().email().transform((v) => v.trim().toLowerCase()),
   name: z.string().min(1).max(120),
-  password: z.string().min(8, "Password must be at least 8 characters"),
+  password: passwordSchema,
   role: z.enum(["SALES_REP", "SALES_MANAGER", "FINANCE_OPS", "ADMIN"]),
+  /// Free text the user typed. Their employer, not a Customer record.
+  organization: z.string().max(200).optional(),
   salesTeamId: z.string().optional(),
 });
 
@@ -43,6 +46,7 @@ export async function registerInternalUser(input: InternalSignupInput) {
       kind: "INTERNAL",
       role: data.role as Role,
       passwordHash: await hashPassword(data.password),
+      organization: data.organization?.trim() || null,
       salesTeamId: data.salesTeamId ?? null,
       createdAt: now,
       updatedAt: now,

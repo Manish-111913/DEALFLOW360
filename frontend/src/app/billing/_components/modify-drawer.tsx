@@ -1,38 +1,37 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { formatIndian, formatRupees } from "./indian-currency";
+import { formatRupees } from "@/lib/money";
 
 /**
- * The right-hand drawer for changing the subscription's seat count.
+ * The drawer for changing a subscription's seat count.
  *
- * The proration arithmetic is the source screen's, unchanged:
+ * It no longer does the proration arithmetic. The old version reproduced the
+ * formula in the browser - seats x price, minus the old rate, times the days
+ * remaining - which meant the number a user agreed to was computed by different
+ * code from the number that got written. `changeSubscriptionQuantity` returns
+ * the real adjustment, and that is what the confirmation reports.
  *
- *   newRate    = seats × ₹1,200
- *   delta      = round((seats − 10) × 1200 / 30 × 10)   // 10 days left in cycle
- *   nextTotal  = newRate + max(delta, 0)                // a credit is not
- *                                                       // added to the invoice
- *
- * It opens on 12 seats rather than the plan's current 10, which is what the
- * original did - the stepper is a proposal, not a mirror of the plan.
+ * What is shown here is the part that needs no clock: the new monthly rate.
  */
-
-const SEAT_PRICE = 1_200;
-const CURRENT_SEATS = 10;
-/** Days left in the cycle that the prorated adjustment covers. */
-const REMAINING_DAYS = 10;
-const CYCLE_DAYS = 30;
-
 export function ModifyDrawer({
+  productName,
+  currentQuantity,
+  unitPrice,
+  busy,
   onConfirm,
   onClose,
 }: {
-  onConfirm: (seats: number) => void;
+  productName: string;
+  currentQuantity: number;
+  unitPrice: number;
+  busy: boolean;
+  onConfirm: (quantity: number) => void;
   onClose: () => void;
 }) {
-  const [seats, setSeats] = useState(12);
-  // The drawer slides in from the right, so it has to mount off-screen first
-  // and move on the next frame - the source screen used a 10ms timeout.
+  const [seats, setSeats] = useState(currentQuantity);
+  // The drawer slides in from the right, so it has to mount off-screen and move
+  // on the next frame.
   const [shown, setShown] = useState(false);
 
   useEffect(() => {
@@ -40,11 +39,9 @@ export function ModifyDrawer({
     return () => clearTimeout(id);
   }, []);
 
-  const newRate = seats * SEAT_PRICE;
-  const delta = Math.round(
-    ((seats - CURRENT_SEATS) * SEAT_PRICE / CYCLE_DAYS) * REMAINING_DAYS,
-  );
-  const nextTotal = newRate + (delta > 0 ? delta : 0);
+  const newRate = seats * unitPrice;
+  const currentRate = currentQuantity * unitPrice;
+  const unchanged = seats === currentQuantity;
 
   return (
     <div
@@ -63,7 +60,7 @@ export function ModifyDrawer({
           <div className="flex items-center justify-between pb-4 border-b border-slate-100">
             <div>
               <h3 className="text-sm font-bold text-slate-900">Modify Subscription Quantity</h3>
-              <p className="text-xs text-slate-500">Cloud Operations &amp; Maintenance</p>
+              <p className="text-xs text-slate-500">{productName}</p>
             </div>
             <button className="text-slate-400 hover:text-slate-700 p-1" onClick={onClose} type="button">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -72,7 +69,6 @@ export function ModifyDrawer({
             </button>
           </div>
 
-          {/* Quantity Stepper */}
           <div className="py-5">
             <label className="block text-xs font-semibold text-slate-700 mb-2">
               Adjust Active Seat Units
@@ -85,7 +81,7 @@ export function ModifyDrawer({
               >
                 -
               </button>
-              <span className="text-xl font-extrabold text-slate-900 w-12 text-center font-mono">
+              <span className="text-xl font-extrabold text-slate-900 w-12 text-center font-jetbrains">
                 {seats}
               </span>
               <button
@@ -95,41 +91,31 @@ export function ModifyDrawer({
               >
                 +
               </button>
-              <span className="text-xs text-slate-500 pl-2">(Previously {CURRENT_SEATS} units)</span>
+              <span className="text-xs text-slate-500 pl-2">
+                (Currently {currentQuantity} units)
+              </span>
             </div>
 
-            {/* Proration Live Calculation */}
             <div className="mt-6 bg-slate-50 rounded-xl p-4 border border-slate-200 text-xs space-y-2.5">
               <div className="font-bold text-slate-800 text-[11px] uppercase tracking-wider">
-                Live Proration Impact
+                Rate Change
               </div>
               <div className="flex justify-between text-slate-600">
                 <span>Current Monthly Rate:</span>
-                <span className="font-mono">₹12,000.00</span>
+                <span className="font-jetbrains">{formatRupees(currentRate)}</span>
               </div>
               <div className="flex justify-between text-slate-600">
                 <span>New Monthly Rate ({seats} seats):</span>
-                <span className="font-mono font-bold text-slate-900">{formatRupees(newRate)}</span>
+                <span className="font-jetbrains font-bold text-slate-900">{formatRupees(newRate)}</span>
               </div>
-              <div className="flex justify-between text-indigo-700 font-medium">
-                <span>Prorated adjustment ({REMAINING_DAYS} remaining days):</span>
-                <span className="font-mono font-bold">
-                  {delta >= 0 ? "+" : ""}₹{formatIndian(delta)}.00
-                </span>
-              </div>
-              <div className="pt-2 border-t border-slate-200 flex justify-between font-extrabold text-slate-900 text-sm">
-                <span>Next Invoice Total (01 Oct):</span>
-                <span className="text-indigo-700 font-mono">{formatRupees(nextTotal)}</span>
-              </div>
+              <p className="text-[11px] text-slate-500 pt-2 border-t border-slate-200">
+                The prorated adjustment for the remainder of this cycle is calculated by the billing
+                service when you confirm, and reported back exactly as it is posted.
+              </p>
             </div>
-            <p className="text-[11px] text-slate-400 mt-2">
-              Proration will be posted to unbilled ledger immediately and reflected in customer&apos;s
-              upcoming cycle.
-            </p>
           </div>
         </div>
 
-        {/* Action buttons */}
         <div className="pt-4 border-t border-slate-100 flex items-center justify-end space-x-3">
           <button
             className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
@@ -139,11 +125,12 @@ export function ModifyDrawer({
             Cancel
           </button>
           <button
-            className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm transition-colors"
+            className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm transition-colors disabled:opacity-60"
+            disabled={busy || unchanged}
             onClick={() => onConfirm(seats)}
             type="button"
           >
-            Confirm Quantity Change
+            {busy ? "Applying…" : "Confirm Quantity Change"}
           </button>
         </div>
       </div>

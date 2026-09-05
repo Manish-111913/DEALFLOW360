@@ -383,8 +383,16 @@ export async function decideApproval(params: {
   };
 }
 
-/** Everything the approval screen needs, including the risk breakdown. */
-export async function getApprovalOverview(quotationId: string) {
+/**
+ * Everything the approval screen needs, including the risk breakdown.
+ *
+ * The risk factors and the approver chain are internal deliberation, never the
+ * customer's to read - so the caller is asserted here rather than trusted to
+ * have been asserted upstream (D20).
+ */
+export async function getApprovalOverview(user: AuthzUser, quotationId: string) {
+  assertCan(user, "view", "riskDetail");
+
   const quotation = await prisma.quotation.findUnique({
     where: { id: quotationId },
     include: {

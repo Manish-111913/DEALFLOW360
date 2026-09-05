@@ -58,7 +58,12 @@ model User {
   /// Set only when kind = PORTAL.
   customerId   String?
   /// Portal users may authenticate by magic link alone, so this stays nullable.
+  /// It is also null for an account created through Google, which has no
+  /// password of ours to store.
   passwordHash String?
+  /// The employer a self-registering user typed at signup. Free text, because
+  /// it is what they told us - it is not the Customer they sell to.
+  organization String?
   active       Boolean  @default(true)
   createdAt    DateTime
   updatedAt    DateTime
@@ -71,6 +76,7 @@ model User {
   customer            Customer?         @relation("PortalUsers", fields: [customerId], references: [id])
   sessions            Session[]
   accounts            Account[]
+  passwordResets      PasswordResetToken[]
   auditLogs           AuditLog[]
   assignedCustomers   Customer[]        @relation("AccountOwner")
   quotations          Quotation[]       @relation("SalesRep")
@@ -154,6 +160,26 @@ model VerificationToken {
 
 /// D18 — one row per issued portal magic link. The raw token is never stored,
 /// only its SHA-256, so a database read cannot be replayed as a login.
+/// A single-use password recovery link.
+///
+/// Shaped like PortalAccessToken deliberately: only the hash is stored, so a
+/// database leak does not yield usable links; `consumedAt` makes a second use
+/// a refusal rather than a second reset.
+model PasswordResetToken {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  /// Set on first successful use. A second use is refused (single-use links).
+  consumedAt DateTime?
+  createdAt  DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
 model PortalAccessToken {
   id         String    @id @default(cuid())
   customerId String

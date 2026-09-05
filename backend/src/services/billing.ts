@@ -186,8 +186,19 @@ export interface BillingScheduleView {
   }[];
 }
 
-/** §B7 - the two kinds of line are shown separately within the same order. */
-export async function getBillingSchedule(quotationId: string): Promise<BillingScheduleView> {
+/**
+ * §B7 - the two kinds of line are shown separately within the same order.
+ *
+ * `billingSchedule` is its own view subject in the matrix, and a portal
+ * identity does not hold it: the invoice ledger and every posted adjustment
+ * are internal (D20).
+ */
+export async function getBillingSchedule(
+  user: AuthzUser,
+  quotationId: string,
+): Promise<BillingScheduleView> {
+  assertCan(user, "view", "billingSchedule");
+
   const quotation = await prisma.quotation.findUnique({
     where: { id: quotationId },
     include: {
@@ -452,7 +463,12 @@ export async function changeSubscriptionQuantity(params: {
   newQuantity: number;
   user: AuthzUser;
 }): Promise<{ delta: Prisma.Decimal; appliedToBillingDate: Date | null }> {
-  assertCan(params.user, "update");
+  // Not "update": every internal role has that, so gating on it let a SALES_REP
+  // rewrite a customer's recurring billing and post a prorated adjustment to
+  // the ledger. A seat reduction issues a credit exactly as a cancellation
+  // does, so it is governed by the same capability - which D17 puts with
+  // Finance/Operations - and `cancelSubscription` already uses it.
+  assertCan(params.user, "issueCredit");
 
   if (params.newQuantity <= 0) {
     throw new ValidationError("Quantity must be greater than zero.", "quantity");

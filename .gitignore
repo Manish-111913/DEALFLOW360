@@ -57,3 +57,8 @@ skills-lock.json
 # .env* above also swallows the template. Real secrets stay ignored; this one
 # is committed on purpose — the README tells people to copy it.
 !.env.example
+
+# Google OAuth client downloads. The values belong in .env (which is ignored
+# above); the file Google hands you is a live credential and must never be
+# committed, so it is ignored by shape rather than by name.
+client_secret_*.json

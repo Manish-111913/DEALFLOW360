@@ -98,7 +98,7 @@ describe("the frozen scenario: 12,000 a month starting on the 15th", () => {
     const quotationId = await recurringOrder();
     await createSubscriptionsForOrder({ quotationId });
 
-    const view = await getBillingSchedule(quotationId);
+    const view = await getBillingSchedule(finance, quotationId);
     const upcoming = view.recurring[0].upcoming;
 
     expect(upcoming[0].amount.equals(D("6400"))).toBe(true);
@@ -111,7 +111,7 @@ describe("the frozen scenario: 12,000 a month starting on the 15th", () => {
     const quotationId = await recurringOrder();
     await createSubscriptionsForOrder({ quotationId });
 
-    const view = await getBillingSchedule(quotationId);
+    const view = await getBillingSchedule(finance, quotationId);
     expect(view.recurring[0].upcoming[0].prorationNote).toContain("16 of 30 days");
     expect(view.recurring[0].upcoming[1].prorationNote).toBeNull();
   });
@@ -121,7 +121,7 @@ describe("the frozen scenario: 12,000 a month starting on the 15th", () => {
     const quotationId = await recurringOrder();
     await createSubscriptionsForOrder({ quotationId });
 
-    const view = await getBillingSchedule(quotationId);
+    const view = await getBillingSchedule(finance, quotationId);
     const dates = view.recurring[0].upcoming
       .slice(0, 3)
       .map((u) => u.billingDate.toISOString().slice(0, 10));
@@ -229,7 +229,7 @@ describe("a one-time line bills independently of the subscription", () => {
     const quotationId = await recurringOrder({ withOneTimeLine: true });
     await createSubscriptionsForOrder({ quotationId });
 
-    const view = await getBillingSchedule(quotationId);
+    const view = await getBillingSchedule(finance, quotationId);
 
     expect(view.oneTime).toHaveLength(1);
     expect(view.oneTime[0].productName).toBe("Laptop Pro");
@@ -243,7 +243,7 @@ describe("a one-time line bills independently of the subscription", () => {
     await createSubscriptionsForOrder({ quotationId });
     await invoiceOneTimeLines({ quotationId });
 
-    const view = await getBillingSchedule(quotationId);
+    const view = await getBillingSchedule(finance, quotationId);
     expect(view.recurring[0].upcoming[0].status).toBe("SCHEDULED");
     expect(view.recurring[0].upcoming[0].amount.equals(D("6400"))).toBe(true);
   });
@@ -409,6 +409,26 @@ describe("cancellation", () => {
 
     await expect(
       cancelSubscription({ subscriptionId: subscription.id, user: rep, reason: "nope" }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  /**
+   * The mirror of the test above, and the reason it exists.
+   *
+   * Cancelling was gated on `issueCredit` from the start, but changing the seat
+   * count was gated on `update` - which every internal role has. That let a
+   * sales rep rewrite a customer's recurring billing and post a prorated
+   * adjustment. Both move money on the customer ledger, so both are
+   * Finance/Operations decisions under D17.
+   */
+  it("refuses a quantity change from a sales rep", async () => {
+    await travelTo(SEP(15));
+    const quotationId = await recurringOrder();
+    await createSubscriptionsForOrder({ quotationId });
+    const subscription = await prisma.subscription.findFirstOrThrow({ where: { quotationId } });
+
+    await expect(
+      changeSubscriptionQuantity({ subscriptionId: subscription.id, newQuantity: 12, user: rep }),
     ).rejects.toBeInstanceOf(ForbiddenError);
   });
 });

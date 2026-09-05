@@ -107,7 +107,7 @@ export function StatusBar() {
         <span className="text-slate-300">·</span>
         <span>Sync: Live (0.2s)</span>
       </div>
-      <span className="font-mono text-slate-600">DealFlow360 v4.2.8 Enterprise</span>
+      <span className="font-jetbrains text-slate-600">DealFlow360 v4.2.8 Enterprise</span>
     </footer>
   );
 }

@@ -93,7 +93,7 @@ describe("the fulfilment screen can actually read the split", () => {
     const quotationId = await approvedOrder(20);
     await planFulfillment(quotationId);
 
-    const view = await getFulfillmentView(quotationId);
+    const view = await getFulfillmentView(admin, quotationId);
 
     expect(view.recommended).not.toBeNull();
     expect(view.recommended!.shipmentCount).toBe(2);
@@ -113,7 +113,7 @@ describe("the fulfilment screen can actually read the split", () => {
     const quotationId = await approvedOrder(5);
     await planFulfillment(quotationId);
 
-    const view = await getFulfillmentView(quotationId);
+    const view = await getFulfillmentView(admin, quotationId);
     expect(view.recommended!.stockSnapshotAt).toBeInstanceOf(Date);
   });
 
@@ -122,7 +122,7 @@ describe("the fulfilment screen can actually read the split", () => {
     const quotationId = await approvedOrder(25);
     await allocateFulfillment({ quotationId, user: finance });
 
-    const view = await getFulfillmentView(quotationId);
+    const view = await getFulfillmentView(admin, quotationId);
 
     expect(view.allocations).toHaveLength(2);
     expect(view.allocations.every((a) => a.productName === "Laptop Pro")).toBe(true);
@@ -228,7 +228,7 @@ describe("shipments and delivery slippage", () => {
     });
     await advanceClock({ days: 2 }, "test");
 
-    const view = await getFulfillmentView(quotationId);
+    const view = await getFulfillmentView(admin, quotationId);
     expect(view.shipments).toHaveLength(1);
     expect(view.shipments[0].slipped).toBe(true);
   });

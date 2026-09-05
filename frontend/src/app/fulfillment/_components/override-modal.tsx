@@ -1,52 +1,105 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import type { FulfillmentData, PlanView } from "./fulfillment-client";
 
 /**
- * The Manual Warehouse Override dialog.
+ * Manual Warehouse Override.
  *
- * Two quantity inputs and a running counter that colours itself against the
- * 20-unit target: emerald when it matches, rose when it goes over, amber when
- * it is short. The dialog keeps its own draft, so cancelling leaves the page's
- * allocation alone - the source screen worked the same way, since it only wrote
- * back to the page inside `applyManualOverride`.
+ * The old version had two hardcoded inputs called "Main Warehouse" and "East
+ * Depot" with their capacities written into the markup, and a target of 20
+ * units. It now builds a grid from the order's real lines and the real
+ * warehouses, seeded with whatever the allocator proposed, and checks each
+ * quantity against that warehouse's actual free stock for that product.
+ *
+ * It emits `picks` in the shape `overrideAllocation` wants - line, warehouse,
+ * quantity - and requires a reason, because an override is a deliberate
+ * commercial act that the service records as one.
  */
-
-export const TARGET_UNITS = 20;
-
-export interface Allocation {
-  main: number;
-  east: number;
-}
-
 export function OverrideModal({
-  allocation,
+  plan,
+  orderLines,
+  warehouses,
+  busy,
   onApply,
   onClose,
 }: {
-  allocation: Allocation;
-  onApply: (next: Allocation) => void;
+  plan: PlanView;
+  orderLines: FulfillmentData["orderLines"];
+  warehouses: FulfillmentData["warehouses"];
+  busy: boolean;
+  onApply: (
+    picks: { lineId: string; warehouseId: string; quantity: number }[],
+    reason: string,
+  ) => void;
   onClose: () => void;
 }) {
-  const [draft, setDraft] = useState<Allocation>(allocation);
+  // Seed the grid from the recommendation, so "override" starts as "the
+  // suggestion, which you may now edit" rather than an empty form.
+  const [picks, setPicks] = useState<Record<string, number>>(() => {
+    const seeded: Record<string, number> = {};
+    for (const line of plan.lines) {
+      const warehouse = warehouses.find((w) => w.name === line.warehouseName);
+      if (warehouse) seeded[`${line.lineId}::${warehouse.id}`] = line.quantity;
+    }
+    return seeded;
+  });
+  const [reason, setReason] = useState("");
+  const [problem, setProblem] = useState<string | null>(null);
 
-  const total = draft.main + draft.east;
-  const counterStyle =
-    total === TARGET_UNITS
-      ? "text-emerald-700 bg-emerald-100/80"
-      : total > TARGET_UNITS
-        ? "text-rose-700 bg-rose-100"
-        : "text-amber-700 bg-amber-100";
+  const perLine = useMemo(() => {
+    const totals: Record<string, number> = {};
+    for (const [key, quantity] of Object.entries(picks)) {
+      const [lineId] = key.split("::");
+      totals[lineId] = (totals[lineId] ?? 0) + quantity;
+    }
+    return totals;
+  }, [picks]);
+
+  function set(lineId: string, warehouseId: string, quantity: number) {
+    setPicks((current) => ({ ...current, [`${lineId}::${warehouseId}`]: Math.max(0, quantity) }));
+    if (problem) setProblem(null);
+  }
+
+  function apply() {
+    if (!reason.trim()) {
+      setProblem("An override needs a reason — it is recorded as a commercial decision.");
+      return;
+    }
+
+    const built = Object.entries(picks)
+      .filter(([, quantity]) => quantity > 0)
+      .map(([key, quantity]) => {
+        const [lineId, warehouseId] = key.split("::");
+        return { lineId, warehouseId, quantity };
+      });
+
+    if (built.length === 0) {
+      setProblem("Allocate at least one unit before applying.");
+      return;
+    }
+
+    // Over-allocating a line is caught by the service too, but saying so here
+    // avoids a round trip to be told something the form already knows.
+    for (const line of orderLines) {
+      const assigned = perLine[line.id] ?? 0;
+      if (assigned > line.quantity) {
+        setProblem(`${line.productName}: ${assigned} allocated against ${line.quantity} ordered.`);
+        return;
+      }
+    }
+
+    onApply(built, reason.trim());
+  }
 
   return (
-    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-opacity">
-      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full overflow-hidden transform transition-all">
-        {/* Modal Header */}
-        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-2xl w-full overflow-hidden max-h-[90vh] flex flex-col">
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50 shrink-0">
           <div>
-            <h3 className="text-base font-bold text-slate-900">Manual Warehouse Override</h3>
+            <h3 className="text-sm font-bold text-slate-900">Manual Warehouse Override</h3>
             <p className="text-xs text-slate-500">
-              Adjust stock dispatch allocation between facilities manually
+              Adjust the dispatch split between facilities
             </p>
           </div>
           <button
@@ -60,47 +113,79 @@ export function OverrideModal({
           </button>
         </div>
 
-        {/* Modal Body */}
-        <div className="p-6 space-y-4">
-          <div className="p-3 bg-indigo-50/60 border border-indigo-100 rounded-xl flex items-center justify-between text-xs font-semibold">
-            <span className="text-indigo-950">
-              Target Fulfillment: <strong>{TARGET_UNITS} Units</strong>
-            </span>
-            <span className={"px-2 py-0.5 rounded font-mono " + counterStyle}>
-              {total} / {TARGET_UNITS} Assigned
-            </span>
-          </div>
+        <div className="p-6 space-y-5 overflow-y-auto app-scroll">
+          {orderLines.map((line) => {
+            const assigned = perLine[line.id] ?? 0;
+            const balanced = assigned === line.quantity;
+            return (
+              <div className="space-y-2" key={line.id}>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-slate-800">{line.productName}</span>
+                  <span
+                    className={
+                      "px-2 py-0.5 rounded font-jetbrains " +
+                      (balanced
+                        ? "text-emerald-700 bg-emerald-100/80"
+                        : assigned > line.quantity
+                          ? "text-rose-700 bg-rose-100"
+                          : "text-amber-700 bg-amber-100")
+                    }
+                  >
+                    {assigned} / {line.quantity} assigned
+                  </span>
+                </div>
 
-          <QuantityField
-            id="override-wh1"
-            label="Main Warehouse (West Hub)"
-            max={12}
-            onChange={(main) => setDraft((current) => ({ ...current, main }))}
-            value={draft.main}
-          />
-          <QuantityField
-            id="override-wh2"
-            label="East Depot (Logistics Center)"
-            max={8}
-            onChange={(east) => setDraft((current) => ({ ...current, east }))}
-            value={draft.east}
-          />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {warehouses.map((warehouse) => {
+                    const free = warehouse.free[line.productId] ?? 0;
+                    const key = `${line.id}::${warehouse.id}`;
+                    return (
+                      <div className="space-y-1" key={warehouse.id}>
+                        <div className="flex justify-between items-center text-[11px]">
+                          <label className="font-semibold text-slate-700" htmlFor={key}>
+                            {warehouse.name}
+                          </label>
+                          <span className="text-slate-400">Free: {free}</span>
+                        </div>
+                        <input
+                          className="w-full text-sm font-semibold rounded-lg border-slate-200 focus:border-indigo-500 focus:ring-indigo-500/20 py-2 px-3"
+                          id={key}
+                          max={free}
+                          min={0}
+                          onChange={(event) =>
+                            set(line.id, warehouse.id, Number.parseInt(event.target.value, 10) || 0)
+                          }
+                          type="number"
+                          value={picks[key] ?? 0}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
 
-          <div className="pt-2 border-t border-slate-100 flex items-center gap-2.5">
-            <input
-              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-              defaultChecked
-              id="allow-partial"
-              type="checkbox"
-            />
-            <label className="text-xs text-slate-600 cursor-pointer select-none" htmlFor="allow-partial">
-              Allow partial consignment dispatch if transit delays occur
+          <div className="pt-2 border-t border-slate-100">
+            <label className="block text-xs font-semibold text-slate-700 mb-1" htmlFor="override-reason">
+              Reason for override (required)
             </label>
+            <textarea
+              className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              id="override-reason"
+              onChange={(event) => {
+                setReason(event.target.value);
+                if (problem) setProblem(null);
+              }}
+              placeholder="Why is this shipping differently from the recommendation?"
+              rows={2}
+              value={reason}
+            />
+            {problem && <p className="text-[11px] text-rose-600 mt-1 font-medium">{problem}</p>}
           </div>
         </div>
 
-        {/* Modal Footer */}
-        <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2.5">
+        <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2.5 shrink-0">
           <button
             className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-800 bg-white border border-slate-300 rounded-lg"
             onClick={onClose}
@@ -109,52 +194,14 @@ export function OverrideModal({
             Cancel
           </button>
           <button
-            className="px-4 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm"
-            onClick={() => onApply(draft)}
+            className="px-4 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm disabled:opacity-60"
+            disabled={busy}
+            onClick={apply}
             type="button"
           >
-            Apply Allocation Override
+            {busy ? "Applying…" : "Apply Allocation Override"}
           </button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function QuantityField({
-  id,
-  label,
-  max,
-  value,
-  onChange,
-}: {
-  id: string;
-  label: string;
-  /** Shown as "Max available" and set on the input, as in the source. */
-  max: number;
-  value: number;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <div className="flex justify-between items-center text-xs">
-        <label className="font-bold text-slate-700" htmlFor={id}>
-          {label}
-        </label>
-        <span className="text-slate-400">Max available: {max} units</span>
-      </div>
-      <div className="relative">
-        <input
-          className="w-full text-sm font-semibold rounded-lg border-slate-200 focus:border-indigo-500 focus:ring-indigo-500/20 py-2 px-3"
-          id={id}
-          max={max}
-          min={0}
-          // An empty field parses to 0, which is what parseInt(...) || 0 did.
-          onChange={(event) => onChange(Number.parseInt(event.target.value, 10) || 0)}
-          type="number"
-          value={value}
-        />
-        <span className="absolute right-3 top-2 text-xs text-slate-400 font-medium">units</span>
       </div>
     </div>
   );

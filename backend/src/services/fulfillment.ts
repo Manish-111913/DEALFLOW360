@@ -698,7 +698,14 @@ export interface FulfillmentView {
  * The plan lines were previously written and never read back, which meant the
  * split existed in the database but could not be shown to anyone.
  */
-export async function getFulfillmentView(quotationId: string): Promise<FulfillmentView> {
+export async function getFulfillmentView(
+  user: AuthzUser,
+  quotationId: string,
+): Promise<FulfillmentView> {
+  // The runner-up plan we kept (D8) is our sourcing reasoning, not the
+  // customer's - so the shape is asserted here, not merely the row.
+  assertCan(user, "view", "fulfilmentProgress");
+
   const quotation = await prisma.quotation.findUnique({
     where: { id: quotationId },
     include: {

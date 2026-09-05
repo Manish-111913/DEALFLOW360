@@ -22,7 +22,22 @@ const SCAN_DIRS = ["backend/src", "backend/prisma", "backend/tests", "frontend/s
 const EXCLUDED_DIRS = new Set(["node_modules", ".next", "generated", "migrations"]);
 
 /** The single file allowed to read the host clock. */
-const CLOCK_EXEMPT = [join("backend", "src", "clock.ts")];
+/**
+ * The two modules where system time may enter, and nowhere else.
+ *
+ * `backend/src/clock.ts` is the authority: business time, offsettable so the
+ * demo can time travel. `frontend/src/lib/display-clock.ts` exists only to
+ * stamp "you did this just now" on a screen - it feeds no calculation, and it
+ * is documented to defer to the backend once the screens are wired to the API.
+ *
+ * This list is kept in step with the `no-restricted-syntax` exemption in
+ * eslint.config.mjs. Both must agree, or one of the two enforcement paths
+ * silently stops covering a file.
+ */
+const CLOCK_EXEMPT = [
+  join("backend", "src", "clock.ts"),
+  join("frontend", "src", "lib", "display-clock.ts"),
+];
 const SELF = join("backend", "tests", "structural.test.ts");
 
 function collectSourceFiles(dir: string, acc: string[] = []): string[] {

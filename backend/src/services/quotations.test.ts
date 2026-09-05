@@ -3,6 +3,7 @@ import { Prisma } from "../generated/prisma/client";
 import { auditTrailFor } from "../audit";
 import { prisma } from "../db";
 import { ValidationError } from "../errors";
+import type { AuthzUser } from "../authz/roles";
 import {
   addQuotationLine,
   createQuotation,
@@ -16,6 +17,9 @@ const D = (v: string | number) => new Prisma.Decimal(v);
 
 let acmeId: string;
 let repId: string;
+
+/** getQuotation returns costs and line margins, so it needs an internal reader. */
+let reader: AuthzUser;
 let laptopId: string;
 let setupId: string;
 const createdQuotations: string[] = [];
@@ -29,6 +33,7 @@ async function newQuotation() {
 beforeAll(async () => {
   acmeId = (await prisma.customer.findUniqueOrThrow({ where: { name: "Acme Industries" } })).id;
   repId = (await prisma.user.findUniqueOrThrow({ where: { email: "priya@dealflow360.test" } })).id;
+  reader = { id: repId, kind: "INTERNAL", role: "SALES_MANAGER", customerId: null };
   laptopId = (await prisma.product.findUniqueOrThrow({ where: { sku: "HW-LAPTOP-PRO" } })).id;
   setupId = (await prisma.product.findUniqueOrThrow({ where: { sku: "SV-SETUP" } })).id;
 });
@@ -182,7 +187,7 @@ describe("D21 — every mutation runs the same recompute", () => {
       discountPercentage: "12.00",
     });
 
-    const full = await getQuotation(q.id);
+    const full = await getQuotation(reader, q.id);
     const line = full!.lines[0];
 
     expect(line.lineSubtotal.equals(D("50000"))).toBe(true);
@@ -196,7 +201,7 @@ describe("D21 — every mutation runs the same recompute", () => {
     await addQuotationLine({ quotationId: q.id, productId: laptopId, quantity: 3, discountPercentage: "7.00" });
     await addQuotationLine({ quotationId: q.id, productId: setupId, quantity: 2, discountPercentage: "11.00" });
 
-    const full = await getQuotation(q.id);
+    const full = await getQuotation(reader, q.id);
     const summed = full!.lines.reduce((acc, l) => acc.plus(l.lineTotal), D(0));
     const saved = await prisma.quotation.findUniqueOrThrow({ where: { id: q.id } });
 

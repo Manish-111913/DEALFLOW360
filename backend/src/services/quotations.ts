@@ -6,7 +6,14 @@ import { NotFoundError, ValidationError } from "../errors";
 import { computeOrderMargin, type DecimalValue, type MarginLineInput } from "../engines/margin";
 import { resolveApprovalRoute } from "../engines/approval-routing";
 import { computeRisk, type DeliveryRisk, type RiskResult } from "../engines/risk";
-import type { RiskLevel } from "../generated/prisma/enums";
+import type {
+  ApprovalState,
+  PortalStatus,
+  QuotationStatus,
+  RiskLevel,
+} from "../generated/prisma/enums";
+import { assertCan, type AuthzUser } from "../authz/roles";
+import { isDenyAll, scopeFor } from "../authz/scope";
 import { ADVISORY_LOCK } from "../locks";
 import { getSettings } from "../settings";
 import { resolveUnitPrice } from "./catalog";
@@ -504,8 +511,19 @@ export async function removeQuotationLine(lineId: string, actorId?: string | nul
   return recomputeQuotation(existing.quotationId);
 }
 
-/** Read a quotation with everything a builder screen needs. */
-export async function getQuotation(quotationId: string) {
+/**
+ * Read a quotation with everything a builder screen needs.
+ *
+ * The payload carries unit costs, line margins and discount ceilings, so it is
+ * an internal object by construction. Taking the caller is what makes that
+ * enforceable: a visibility check answers "may they see this row?", which is a
+ * different question from "may they see it in this shape?" (D20). Callers used
+ * to answer only the first, so a portal identity reading their own quotation
+ * was handed our cost base with it.
+ */
+export async function getQuotation(user: AuthzUser, quotationId: string) {
+  assertCan(user, "view", "margin");
+
   return prisma.quotation.findUnique({
     where: { id: quotationId },
     include: {
@@ -520,4 +538,268 @@ export async function getQuotation(quotationId: string) {
       },
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Listing
+// ---------------------------------------------------------------------------
+
+/** The pipeline stage a quotation is in, derived rather than stored. */
+export type PipelineStage =
+  | "DRAFT"
+  | "PENDING_APPROVAL"
+  | "NEGOTIATION"
+  | "APPROVED"
+  | "FULFILLMENT"
+  | "CLOSED";
+
+export interface QuotationListRow {
+  id: string;
+  quoteNumber: string;
+  customerId: string;
+  customerName: string;
+  salesRepId: string;
+  salesRepName: string;
+  status: QuotationStatus;
+  approvalState: ApprovalState;
+  /** Whether the customer can see this, and what they have done with it. */
+  portalStatus: PortalStatus;
+  stage: PipelineStage;
+  totalAmount: string;
+  marginPercentage: string;
+  riskScore: string;
+  riskLevel: RiskLevel;
+  negotiationCount: number;
+  lastActivityAt: Date;
+  validUntil: Date | null;
+  lineCount: number;
+}
+
+/**
+ * Which of the five pipeline stages a quotation is in.
+ *
+ * The schema stores two orthogonal things - `status` (DRAFT | SENT | CONFIRMED
+ * | CANCELLED) and `approvalState` (NONE | PENDING_MANAGER | PENDING_FINANCE |
+ * APPROVED | REJECTED | RETURNED). The board the sales team works from is a
+ * single ladder, so the stage is derived from both rather than stored as a
+ * third field that could disagree with them.
+ *
+ * Order matters: a confirmed order is closed no matter what its approval state
+ * says, and a quote awaiting a decision is "pending approval" even though its
+ * status is still DRAFT.
+ */
+export function stageOf(quotation: {
+  status: QuotationStatus;
+  approvalState: ApprovalState;
+  negotiationCount: number;
+}): PipelineStage {
+  if (quotation.status === "CANCELLED") return "CLOSED";
+  if (quotation.status === "CONFIRMED") return "FULFILLMENT";
+  if (quotation.approvalState === "PENDING_MANAGER" || quotation.approvalState === "PENDING_FINANCE") {
+    return "PENDING_APPROVAL";
+  }
+  if (quotation.approvalState === "APPROVED") return "APPROVED";
+  // A returned or rejected quote is back with the rep, and one the customer has
+  // countered is in negotiation - both are still being worked, not closed.
+  if (quotation.negotiationCount > 0) return "NEGOTIATION";
+  return "DRAFT";
+}
+
+export interface ListQuotationsFilters {
+  stage?: PipelineStage;
+  customerId?: string;
+  /** Restrict to the caller's own deals, on top of whatever scoping allows. */
+  mineOnly?: boolean;
+  search?: string;
+  take?: number;
+}
+
+/**
+ * The quotation list behind the Sales Workspace and the command centre.
+ *
+ * `getQuotation` reads one deal in full; nothing could list them, so the
+ * pipeline board had no source and was hardcoded. This is that source.
+ *
+ * Scoping is not optional and not the caller's job: `scopeFor` decides which
+ * rows this user may see at all - a rep their own, a manager their team's,
+ * finance and admin everything - and the filters narrow within that. A caller
+ * cannot widen it, because the scope fragment and the filters are ANDed.
+ */
+export async function listQuotations(
+  user: AuthzUser,
+  filters: ListQuotationsFilters = {},
+): Promise<QuotationListRow[]> {
+  // "view quotation" is the wrong gate on its own: a portal identity holds it,
+  // but a QuotationListRow carries marginPercentage, riskScore and riskLevel.
+  // The matrix already says a customer may never see those - this asks it.
+  // Portal callers want `listPortalQuotations` instead.
+  assertCan(user, "view", "quotation");
+  assertCan(user, "view", "margin");
+
+  const scope = scopeFor(user, "Quotation");
+  if (isDenyAll(scope)) return [];
+
+  const where: Prisma.QuotationWhereInput = { ...(scope as Prisma.QuotationWhereInput) };
+
+  if (filters.customerId) where.customerId = filters.customerId;
+  if (filters.mineOnly) where.salesRepId = user.id;
+  if (filters.search) {
+    const term = filters.search.trim();
+    if (term) {
+      where.OR = [
+        { quoteNumber: { contains: term, mode: "insensitive" } },
+        { customer: { name: { contains: term, mode: "insensitive" } } },
+      ];
+    }
+  }
+
+  const rows = await prisma.quotation.findMany({
+    where,
+    orderBy: { lastActivityAt: "desc" },
+    take: filters.take ?? 200,
+    include: {
+      customer: { select: { id: true, name: true } },
+      salesRep: { select: { id: true, name: true } },
+      _count: { select: { lines: true } },
+    },
+  });
+
+  const mapped: QuotationListRow[] = rows.map((q) => ({
+    id: q.id,
+    quoteNumber: q.quoteNumber,
+    customerId: q.customerId,
+    customerName: q.customer.name,
+    salesRepId: q.salesRepId,
+    salesRepName: q.salesRep.name,
+    status: q.status,
+    approvalState: q.approvalState,
+    portalStatus: q.portalStatus,
+    stage: stageOf(q),
+    totalAmount: q.totalAmount.toFixed(2),
+    marginPercentage: q.marginPercentage.toFixed(2),
+    riskScore: q.riskScore.toFixed(2),
+    riskLevel: q.riskLevel,
+    negotiationCount: q.negotiationCount,
+    lastActivityAt: q.lastActivityAt,
+    validUntil: q.validUntil,
+    lineCount: q._count.lines,
+  }));
+
+  // Stage is derived, so it cannot be a database filter without duplicating the
+  // rule in SQL. Filtering here keeps one definition of what a stage means.
+  return filters.stage ? mapped.filter((row) => row.stage === filters.stage) : mapped;
+}
+
+/** What a customer may be told about their own quotations: no margin, no risk. */
+export interface PortalQuotationRow {
+  id: string;
+  quoteNumber: string;
+  status: QuotationStatus;
+  portalStatus: PortalStatus;
+  totalAmount: string;
+  validUntil: Date | null;
+}
+
+/**
+ * The portal's own list, as a separate object rather than a filtered internal
+ * one (D20).
+ *
+ * Building a whitelist here means a field added to `QuotationListRow` later
+ * cannot silently reach a customer: it has to be added to this shape too, and
+ * that is a decision someone makes on purpose.
+ */
+export async function listPortalQuotations(user: AuthzUser): Promise<PortalQuotationRow[]> {
+  assertCan(user, "view", "quotation");
+
+  const scope = scopeFor(user, "Quotation");
+  if (isDenyAll(scope)) return [];
+
+  const rows = await prisma.quotation.findMany({
+    where: scope as Prisma.QuotationWhereInput,
+    orderBy: { lastActivityAt: "desc" },
+    take: 200,
+    select: {
+      id: true,
+      quoteNumber: true,
+      status: true,
+      portalStatus: true,
+      totalAmount: true,
+      validUntil: true,
+    },
+  });
+
+  return rows.map((q) => ({
+    id: q.id,
+    quoteNumber: q.quoteNumber,
+    status: q.status,
+    portalStatus: q.portalStatus,
+    totalAmount: q.totalAmount.toFixed(2),
+    validUntil: q.validUntil,
+  }));
+}
+
+/**
+ * The five pipeline columns with their counts and values.
+ *
+ * Derived from the same scoped list, so the board totals can never disagree
+ * with the rows underneath them.
+ */
+export async function getPipelineSummary(user: AuthzUser) {
+  const rows = await listQuotations(user);
+
+  const stages: PipelineStage[] = [
+    "DRAFT",
+    "PENDING_APPROVAL",
+    "NEGOTIATION",
+    "APPROVED",
+    "FULFILLMENT",
+  ];
+
+  const byStage = stages.map((stage) => {
+    const inStage = rows.filter((row) => row.stage === stage);
+    const value = inStage.reduce((sum, row) => sum + Number(row.totalAmount), 0);
+    return { stage, count: inStage.length, value: value.toFixed(2) };
+  });
+
+  const totalValue = byStage.reduce((sum, s) => sum + Number(s.value), 0);
+
+  return {
+    stages: byStage,
+    totalDeals: rows.length,
+    totalValue: totalValue.toFixed(2),
+  };
+}
+
+/**
+ * May this user see this quotation at all?
+ *
+ * `getQuotation`, `getApprovalOverview`, `getFulfillmentView` and
+ * `getBillingSchedule` are raw loaders: they take an id, check nothing, and
+ * return the row. That is fine inside the backend, where the caller has already
+ * been authorised - but an HTTP route that passes a URL parameter straight into
+ * one of them is an IDOR, and every screen does exactly that.
+ *
+ * So routes call this first. It answers with the same scope rule the list uses,
+ * which means a rep asking for another rep's quotation by id gets the same
+ * answer as a rep who simply cannot see it in a list: not found.
+ */
+export async function assertQuotationVisible(
+  user: AuthzUser,
+  quotationId: string,
+): Promise<void> {
+  assertCan(user, "view", "quotation");
+
+  const scope = scopeFor(user, "Quotation");
+  if (isDenyAll(scope)) {
+    throw new NotFoundError(`Quotation ${quotationId} does not exist`);
+  }
+
+  const visible = await prisma.quotation.findFirst({
+    where: { AND: [{ id: quotationId }, scope as Prisma.QuotationWhereInput] },
+    select: { id: true },
+  });
+
+  // Deliberately "not found" rather than "forbidden": telling an unauthorised
+  // caller that a record exists is itself a disclosure.
+  if (!visible) throw new NotFoundError(`Quotation ${quotationId} does not exist`);
 }

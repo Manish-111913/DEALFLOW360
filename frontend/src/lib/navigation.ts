@@ -9,7 +9,10 @@
  */
 
 export const ROUTES = {
-  home: "/",
+  /** The public marketing page. The only route a signed-out visitor lands on. */
+  landing: "/",
+  /** Where signing in takes you. `landing` owns "/" now, so this is explicit. */
+  home: "/dashboard",
   sales: "/sales",
   approvals: "/approvals",
   fulfillment: "/fulfillment",
@@ -23,6 +26,7 @@ export type Route = (typeof ROUTES)[RouteKey];
 
 /** Which dock item is highlighted, keyed the same way as ROUTES. */
 export const SCREEN_TITLES: Record<RouteKey, string> = {
+  landing: "DealFlow360",
   home: "Command Center",
   sales: "Sales Workspace",
   approvals: "Discount Approval",

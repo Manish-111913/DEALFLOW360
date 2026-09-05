@@ -291,3 +291,15 @@
 .animate-pulse-soft {
   animation: pulse-soft 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
+
+/**
+ * The faint dot grid behind the sign-in card.
+ *
+ * A CSS class rather than an arbitrary Tailwind value because it is a
+ * `background-image` plus a `background-size` pair - two properties that have
+ * to stay in step, which a utility string cannot express.
+ */
+.auth-grid {
+  background-image: radial-gradient(rgba(99, 102, 241, 0.06) 1px, transparent 1px);
+  background-size: 24px 24px;
+}

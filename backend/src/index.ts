@@ -57,6 +57,34 @@ export {
 } from "./auth/portal-tokens";
 
 export {
+  failedPasswordRules,
+  passwordSchema,
+  passwordStrength,
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_RULES,
+  type PasswordRule,
+  type PasswordStrength,
+} from "./auth/password-policy";
+
+export {
+  requestPasswordReset,
+  resetPassword,
+  type PasswordResetRequest,
+  type ResetRejection,
+  type ResetResult,
+} from "./auth/password-reset";
+
+export {
+  allowedDomains,
+  linkGoogleAccount,
+  resolveGoogleSignIn,
+  GOOGLE_REJECTION_MESSAGE,
+  type GoogleProfile,
+  type GoogleRejection,
+  type GoogleSignInResult,
+} from "./auth/google";
+
+export {
   createPortalUser,
   EmailTakenError,
   internalSignupSchema,
@@ -106,7 +134,12 @@ export { step, type ExplainStep, type Explanation } from "./engines/explain";
 export {
   addQuotationLine,
   createQuotation,
+  assertQuotationVisible,
+  getPipelineSummary,
   getQuotation,
+  listPortalQuotations,
+  listQuotations,
+  stageOf,
   recomputeQuotation,
   removeQuotationLine,
   updateQuotationLine,
@@ -114,6 +147,10 @@ export {
   type CreateQuotationInput,
   type RecomputeResult,
   type UpdateLineInput,
+  type ListQuotationsFilters,
+  type PipelineStage,
+  type PortalQuotationRow,
+  type QuotationListRow,
 } from "./services/quotations";
 
 export {

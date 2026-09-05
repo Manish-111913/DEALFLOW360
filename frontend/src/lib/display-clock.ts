@@ -18,3 +18,17 @@
 export function displayTimeNow(): string {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
+
+/**
+ * "UTC 15:06:26" - the ticking readout in the sign-in window's title bar.
+ *
+ * Formatted by hand rather than with toLocaleTimeString, because the server
+ * renders this markup too: any locale-dependent formatting would produce a
+ * different string on the server than in the browser and hydration would
+ * complain. Zero-padded UTC digits are the same everywhere.
+ */
+export function displayUtcClock(): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `UTC ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())}`;
+}

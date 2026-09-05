@@ -7,15 +7,24 @@ import containerQueries from "@tailwindcss/container-queries";
  *
  * Two deliberate departures from simply merging them:
  *
- * 1. `sans` and `mono` are NOT overridden. Each screen set them to something
- *    different - `font-sans` is Inter on the command centre, approvals and deal
- *    health, and Plus Jakarta Sans on the workspace, fulfilment, billing and
- *    portal; `font-mono` is JetBrains Mono on four screens and the browser
- *    default on the other three, which never configured it. A single global
- *    value would silently restyle whichever screens lost the vote, so the
- *    families are exposed under their own names - `font-inter`, `font-jakarta`,
- *    `font-jetbrains` - and each screen names the one it was designed with.
- *    Anything left on plain `font-mono` is a screen that wanted the default.
+ * 1. `sans` and `mono` are NOT overridden. The families are exposed under their
+ *    own names - `font-jakarta`, `font-jetbrains` - and each screen names the
+ *    one it uses, so nothing is restyled by a global default changing.
+ *
+ *    The seven screens originally disagreed: `font-sans` was Inter on the
+ *    command centre, approvals and deal health, and Plus Jakarta Sans on the
+ *    workspace, fulfilment, billing and portal. That 4/3 split was faithful to
+ *    the source designs but read as two products, so it was settled on Plus
+ *    Jakarta Sans - the family of Subscription & Billing, the reference screen.
+ *    The `inter` utility is gone rather than left unused; Inter survives only
+ *    as the fallback inside the stacks below, for the moment before the
+ *    webfont lands.
+ *
+ *    `font-mono` had the same problem and is now unused too. Because `mono` is
+ *    not overridden here, that class resolved to the browser's own monospace -
+ *    Consolas on Windows - so a quote reference rendered in Consolas on
+ *    fulfilment and billing while the command centre showed JetBrains Mono.
+ *    Every mono readout now says `font-jetbrains`, which is a font we load.
  *
  * 2. The `brand` and `primary` palettes every screen declared are omitted: not
  *    one of the seven files uses a single `*-brand-*` or `*-primary-*` class.
@@ -28,7 +37,6 @@ const config: Config = {
   theme: {
     extend: {
       fontFamily: {
-        inter: ["Inter", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "Roboto", "sans-serif"],
         jakarta: ['"Plus Jakarta Sans"', "Inter", "system-ui", "sans-serif"],
         display: ['"Plus Jakarta Sans"', "Inter", "sans-serif"],
         jetbrains: ['"JetBrains Mono"', "monospace"],

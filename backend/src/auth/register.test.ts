@@ -3,6 +3,9 @@ import { EmailTakenError, registerInternalUser } from "./register";
 import { verifyPassword } from "./password";
 import { prisma } from "../db";
 
+/** Satisfies every rule in PASSWORD_RULES: length, both cases, digit, symbol. */
+const VALID_PASSWORD = "Correct-Horse-9";
+
 const created: string[] = [];
 
 afterAll(async () => {
@@ -23,15 +26,15 @@ describe("internal signup", () => {
     const user = await registerInternalUser({
       email,
       name: "Sign Up Test",
-      password: "correct horse battery",
+      password: VALID_PASSWORD,
       role: "SALES_REP",
     });
     created.push(user.id);
 
     expect(user.kind).toBe("INTERNAL");
     expect(user.role).toBe("SALES_REP");
-    expect(user.passwordHash).not.toBe("correct horse battery");
-    expect(await verifyPassword("correct horse battery", user.passwordHash!)).toBe(true);
+    expect(user.passwordHash).not.toBe(VALID_PASSWORD);
+    expect(await verifyPassword(VALID_PASSWORD, user.passwordHash!)).toBe(true);
   });
 
   it("normalises the email to lower case", async () => {
@@ -39,7 +42,7 @@ describe("internal signup", () => {
     const user = await registerInternalUser({
       email: `${local}@Example.TEST`,
       name: "Case Test",
-      password: "password123",
+      password: VALID_PASSWORD,
       role: "FINANCE_OPS",
     });
     created.push(user.id);
@@ -52,21 +55,45 @@ describe("internal signup", () => {
       registerInternalUser({
         email: "priya@dealflow360.test",
         name: "Impostor",
-        password: "password123",
+        password: VALID_PASSWORD,
         role: "ADMIN",
       }),
     ).rejects.toBeInstanceOf(EmailTakenError);
   });
 
-  it("refuses a short password", async () => {
-    await expect(
-      registerInternalUser({
-        email: `short-${Math.random().toString(36).slice(2)}@example.test`,
-        name: "Short",
-        password: "abc",
-        role: "SALES_REP",
-      }),
-    ).rejects.toThrow();
+  it("refuses a password that breaks the corporate policy", async () => {
+    // Each of these fails exactly one rule, so a passing test cannot be an
+    // accident of one over-broad check.
+    const rejected = [
+      "Short-9!",              // under 12 characters
+      "alllowercase-9!",       // no uppercase
+      "ALLUPPERCASE-9!",       // no lowercase
+      "NoDigitsOrSigns",       // no number, no symbol
+    ];
+
+    for (const password of rejected) {
+      await expect(
+        registerInternalUser({
+          email: `weak-${Math.random().toString(36).slice(2)}@example.test`,
+          name: "Weak",
+          password,
+          role: "SALES_REP",
+        }),
+      ).rejects.toThrow();
+    }
+  });
+
+  it("records the organization the user typed", async () => {
+    const user = await registerInternalUser({
+      email: `org-${Math.random().toString(36).slice(2)}@example.test`,
+      name: "Has Employer",
+      password: VALID_PASSWORD,
+      role: "SALES_REP",
+      organization: "Acme Global Inc",
+    });
+    created.push(user.id);
+
+    expect(user.organization).toBe("Acme Global Inc");
   });
 });
 
@@ -76,7 +103,7 @@ describe("audit integrity constrains user lifecycle", () => {
     const user = await registerInternalUser({
       email,
       name: "Has History",
-      password: "password123",
+      password: VALID_PASSWORD,
       role: "SALES_REP",
     });
     created.push(user.id);
@@ -93,7 +120,7 @@ describe("audit integrity constrains user lifecycle", () => {
     const user = await registerInternalUser({
       email,
       name: "Can Be Disabled",
-      password: "password123",
+      password: VALID_PASSWORD,
       role: "SALES_REP",
     });
     created.push(user.id);
