@@ -20,10 +20,12 @@
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "7.10.0",
     "bcryptjs": "3.0.3",
+    "pdfkit": "^0.20.2",
     "zod": "4.5.4"
   },
   "devDependencies": {
     "@types/node": "^24",
+    "@types/pdfkit": "^0.17.6",
     "@types/pg": "^8.23.1",
     "dotenv": "^17",
     "pg": "^8.23.0",

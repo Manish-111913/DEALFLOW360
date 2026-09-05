@@ -4,6 +4,7 @@ import { assertCan, type AuthzUser } from "../authz/roles";
 import { currentBusinessTime } from "../clock";
 import { prisma } from "../db";
 import { ConflictError, NotFoundError, ValidationError } from "../errors";
+import { ADVISORY_LOCK } from "../locks";
 import {
   planAllocation,
   stockKey,
@@ -636,4 +637,366 @@ export async function consolidateBackorder(params: {
     reason: "Backorder consolidated from newly received stock",
     fieldChanges: { backorderId: backorder.id, quantity: backorder.quantity },
   });
+}
+
+// ---------------------------------------------------------------------------
+// 5. Reading the fulfilment picture
+// ---------------------------------------------------------------------------
+
+export interface FulfillmentPlanView {
+  planId: string;
+  status: string;
+  isRunnerUp: boolean;
+  shipmentCount: number;
+  shippingCost: string;
+  rationale: string | null;
+  /** How old the stock reading behind this plan is (D4 - it can go stale). */
+  stockSnapshotAt: Date;
+  lines: { lineId: string; productName: string; warehouseName: string; quantity: number }[];
+}
+
+export interface FulfillmentView {
+  quotationId: string;
+  quoteNumber: string;
+  recommended: FulfillmentPlanView | null;
+  /** D8 - the trade-off, so the screen can show a choice rather than a verdict. */
+  alternative: FulfillmentPlanView | null;
+  allocations: {
+    id: string;
+    lineId: string;
+    productName: string;
+    warehouseName: string;
+    requestedQuantity: number;
+    allocatedQuantity: number;
+    status: string;
+    isManualOverride: boolean;
+  }[];
+  backorders: {
+    id: string;
+    lineId: string;
+    productName: string;
+    quantity: number;
+    status: string;
+    expectedDate: Date | null;
+  }[];
+  shipments: {
+    id: string;
+    shipmentNumber: string;
+    warehouseName: string;
+    status: string;
+    shippingCost: string;
+    estimatedDeliveryDate: Date | null;
+    actualDeliveryDate: Date | null;
+    /** Late, or overdue and still undelivered. */
+    slipped: boolean;
+  }[];
+}
+
+/**
+ * Everything the fulfilment screen needs, in one read.
+ *
+ * The plan lines were previously written and never read back, which meant the
+ * split existed in the database but could not be shown to anyone.
+ */
+export async function getFulfillmentView(quotationId: string): Promise<FulfillmentView> {
+  const quotation = await prisma.quotation.findUnique({
+    where: { id: quotationId },
+    include: {
+      lines: { include: { product: { select: { name: true } } } },
+      fulfillmentPlans: {
+        where: { status: { in: ["RECOMMENDED", "ACCEPTED", "ALTERNATIVE"] } },
+        orderBy: { createdAt: "desc" },
+        include: { lines: true },
+      },
+      allocations: { include: { warehouse: { select: { name: true } } } },
+      backorders: true,
+      shipments: { include: { warehouse: { select: { name: true } } } },
+    },
+  });
+  if (!quotation) throw new NotFoundError(`Quotation ${quotationId} does not exist`);
+
+  const productByLine = new Map(quotation.lines.map((l) => [l.id, l.product.name]));
+  const warehouses = await prisma.warehouse.findMany({ select: { id: true, name: true } });
+  const warehouseName = new Map(warehouses.map((w) => [w.id, w.name]));
+  const now = currentBusinessTime();
+
+  const toPlanView = (
+    plan: (typeof quotation.fulfillmentPlans)[number],
+  ): FulfillmentPlanView => ({
+    planId: plan.id,
+    status: plan.status,
+    isRunnerUp: plan.isRunnerUp,
+    shipmentCount: plan.estimatedShipmentCount,
+    shippingCost: plan.estimatedShippingCost.toFixed(2),
+    rationale: plan.rationale,
+    stockSnapshotAt: plan.stockSnapshotAt,
+    lines: plan.lines.map((l) => ({
+      lineId: l.quotationLineId,
+      productName: productByLine.get(l.quotationLineId) ?? "",
+      warehouseName: warehouseName.get(l.warehouseId) ?? "",
+      quantity: l.quantity,
+    })),
+  });
+
+  const recommended = quotation.fulfillmentPlans.find(
+    (p) => p.status === "RECOMMENDED" || p.status === "ACCEPTED",
+  );
+  const alternative = quotation.fulfillmentPlans.find((p) => p.status === "ALTERNATIVE");
+
+  return {
+    quotationId,
+    quoteNumber: quotation.quoteNumber,
+    recommended: recommended ? toPlanView(recommended) : null,
+    alternative: alternative ? toPlanView(alternative) : null,
+    allocations: quotation.allocations.map((a) => ({
+      id: a.id,
+      lineId: a.quotationLineId,
+      productName: productByLine.get(a.quotationLineId) ?? "",
+      warehouseName: a.warehouse.name,
+      requestedQuantity: a.requestedQuantity,
+      allocatedQuantity: a.allocatedQuantity,
+      status: a.status,
+      isManualOverride: a.isManualOverride,
+    })),
+    backorders: quotation.backorders.map((b) => ({
+      id: b.id,
+      lineId: b.quotationLineId,
+      productName: productByLine.get(b.quotationLineId) ?? "",
+      quantity: b.quantity,
+      status: b.status,
+      expectedDate: b.expectedDate,
+    })),
+    shipments: quotation.shipments.map((sh) => ({
+      id: sh.id,
+      shipmentNumber: sh.shipmentNumber,
+      warehouseName: sh.warehouse.name,
+      status: sh.status,
+      shippingCost: sh.shippingCost.toFixed(2),
+      estimatedDeliveryDate: sh.estimatedDeliveryDate,
+      actualDeliveryDate: sh.actualDeliveryDate,
+      slipped: hasSlipped(sh, now),
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 6. Shipments and delivery slippage
+// ---------------------------------------------------------------------------
+
+interface ShipmentLike {
+  status: string;
+  estimatedDeliveryDate: Date | null;
+  actualDeliveryDate: Date | null;
+}
+
+/**
+ * A shipment has slipped if it arrived after it was promised, or if the promise
+ * has passed and nothing has arrived.
+ *
+ * §B9 asks for "delivery promise slippage indicators", which needs both a
+ * promise and an outcome - the reason Shipment carries two dates rather than
+ * one.
+ */
+export function hasSlipped(shipment: ShipmentLike, asOf: Date): boolean {
+  if (!shipment.estimatedDeliveryDate) return false;
+  if (shipment.status === "CANCELLED") return false;
+
+  if (shipment.actualDeliveryDate) {
+    return shipment.actualDeliveryDate.getTime() > shipment.estimatedDeliveryDate.getTime();
+  }
+  return asOf.getTime() > shipment.estimatedDeliveryDate.getTime();
+}
+
+/**
+ * Dispatch everything reserved at one warehouse as a single shipment.
+ *
+ * One shipment per warehouse is the same unit the allocator counted and costed
+ * (D9), so the promise made here matches the plan the customer was shown.
+ */
+export async function dispatchShipment(params: {
+  quotationId: string;
+  warehouseId: string;
+  user: AuthzUser;
+  estimatedDeliveryDate?: Date | null;
+}): Promise<{ shipmentId: string; shipmentNumber: string; allocations: number }> {
+  assertCan(params.user, "allocate");
+
+  const warehouse = await prisma.warehouse.findUnique({ where: { id: params.warehouseId } });
+  if (!warehouse) throw new NotFoundError(`Warehouse ${params.warehouseId} does not exist`);
+
+  const reserved = await prisma.fulfillmentAllocation.findMany({
+    where: {
+      quotationId: params.quotationId,
+      warehouseId: params.warehouseId,
+      status: "RESERVED",
+    },
+  });
+  if (reserved.length === 0) {
+    throw new ConflictError("Nothing is reserved at this warehouse to dispatch.");
+  }
+
+  const now = currentBusinessTime();
+
+  const shipment = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADVISORY_LOCK.stockAllocation})`;
+    const count = await tx.shipment.count();
+
+    const created = await tx.shipment.create({
+      data: {
+        shipmentNumber: `SHP-${now.getUTCFullYear()}-${String(count + 1).padStart(4, "0")}`,
+        quotationId: params.quotationId,
+        warehouseId: params.warehouseId,
+        status: "DISPATCHED",
+        shippingCost: warehouse.shippingCost,
+        estimatedDeliveryDate: params.estimatedDeliveryDate ?? null,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+
+    await tx.fulfillmentAllocation.updateMany({
+      where: { id: { in: reserved.map((r) => r.id) } },
+      data: { status: "SHIPPED", updatedAt: now },
+    });
+
+    // Reserved stock has now physically left the building, so it stops being
+    // both on hand and reserved.
+    for (const allocation of reserved) {
+      const line = await tx.quotationLine.findUniqueOrThrow({
+        where: { id: allocation.quotationLineId },
+        select: { productId: true, variantId: true },
+      });
+      const row = await tx.warehouseStock.findFirst({
+        where: {
+          warehouseId: params.warehouseId,
+          productId: line.productId,
+          variantId: line.variantId ?? null,
+        },
+      });
+      if (!row) continue;
+      await tx.warehouseStock.update({
+        where: { id: row.id },
+        data: {
+          availableQuantity: Math.max(0, row.availableQuantity - allocation.allocatedQuantity),
+          reservedQuantity: Math.max(0, row.reservedQuantity - allocation.allocatedQuantity),
+          updatedAt: now,
+        },
+      });
+    }
+
+    return created;
+  });
+
+  await appendAudit({
+    entityName: "Quotation",
+    entityId: params.quotationId,
+    action: "ALLOCATE",
+    actorId: params.user.id,
+    reason: `Dispatched from ${warehouse.name}`,
+    fieldChanges: {
+      shipmentNumber: shipment.shipmentNumber,
+      allocations: reserved.length,
+      promisedFor: params.estimatedDeliveryDate?.toISOString() ?? null,
+    },
+  });
+
+  return {
+    shipmentId: shipment.id,
+    shipmentNumber: shipment.shipmentNumber,
+    allocations: reserved.length,
+  };
+}
+
+/** Record arrival. Late arrivals are what the slippage indicator reads. */
+export async function recordDelivery(params: {
+  shipmentId: string;
+  user: AuthzUser;
+  deliveredAt?: Date;
+}): Promise<{ slipped: boolean; daysLate: number }> {
+  assertCan(params.user, "allocate");
+
+  const shipment = await prisma.shipment.findUnique({ where: { id: params.shipmentId } });
+  if (!shipment) throw new NotFoundError(`Shipment ${params.shipmentId} does not exist`);
+  if (shipment.status === "DELIVERED") {
+    throw new ConflictError("This shipment is already recorded as delivered.");
+  }
+
+  const now = currentBusinessTime();
+  const deliveredAt = params.deliveredAt ?? now;
+
+  const updated = await prisma.shipment.update({
+    where: { id: shipment.id },
+    data: { status: "DELIVERED", actualDeliveryDate: deliveredAt, updatedAt: now },
+  });
+
+  const slipped = hasSlipped(updated, now);
+  const daysLate =
+    slipped && updated.estimatedDeliveryDate
+      ? Math.max(
+          0,
+          Math.floor(
+            (deliveredAt.getTime() - updated.estimatedDeliveryDate.getTime()) / 86_400_000,
+          ),
+        )
+      : 0;
+
+  await appendAudit({
+    entityName: "Quotation",
+    entityId: shipment.quotationId,
+    action: "UPDATE",
+    actorId: params.user.id,
+    reason: slipped ? `Delivered ${daysLate} day(s) late` : "Delivered on time",
+    fieldChanges: {
+      shipmentNumber: shipment.shipmentNumber,
+      promisedFor: updated.estimatedDeliveryDate?.toISOString() ?? null,
+      deliveredAt: deliveredAt.toISOString(),
+    },
+  });
+
+  return { slipped, daysLate };
+}
+
+export interface SlippedShipment {
+  shipmentId: string;
+  shipmentNumber: string;
+  quotationId: string;
+  quoteNumber: string;
+  warehouseName: string;
+  estimatedDeliveryDate: Date;
+  actualDeliveryDate: Date | null;
+  daysLate: number;
+}
+
+/** Every shipment that broke its promise, for the deal-health dashboard. */
+export async function findSlippedShipments(asOf?: Date): Promise<SlippedShipment[]> {
+  const at = asOf ?? currentBusinessTime();
+
+  const shipments = await prisma.shipment.findMany({
+    where: { estimatedDeliveryDate: { not: null }, status: { not: "CANCELLED" } },
+    include: {
+      quotation: { select: { quoteNumber: true } },
+      warehouse: { select: { name: true } },
+    },
+  });
+
+  return shipments
+    .filter((sh) => hasSlipped(sh, at))
+    .map((sh) => {
+      const promised = sh.estimatedDeliveryDate as Date;
+      const reference = sh.actualDeliveryDate ?? at;
+      return {
+        shipmentId: sh.id,
+        shipmentNumber: sh.shipmentNumber,
+        quotationId: sh.quotationId,
+        quoteNumber: sh.quotation.quoteNumber,
+        warehouseName: sh.warehouse.name,
+        estimatedDeliveryDate: promised,
+        actualDeliveryDate: sh.actualDeliveryDate,
+        daysLate: Math.max(
+          0,
+          Math.floor((reference.getTime() - promised.getTime()) / 86_400_000),
+        ),
+      };
+    })
+    .sort((a, b) => b.daysLate - a.daysLate);
 }

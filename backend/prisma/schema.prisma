@@ -97,6 +97,22 @@ model SalesTeam {
 // ===========================================================================
 // AUTH.JS ADAPTER
 // ===========================================================================
+//
+// These three tables are EMPTY BY DESIGN, not by oversight.
+//
+// Auth.js writes them only when a database-session adapter is configured. This
+// application authenticates with a Credentials provider, which Auth.js supports
+// only with JWT sessions, so no adapter is wired and no row is ever written.
+//
+// They are kept rather than dropped because they are the exact shape Auth.js
+// expects: adding OAuth or magic-link email sign-in later is then a
+// configuration change, where deleting them would make it a migration. The cost
+// of keeping them is three unused tables; the cost of removing them is a schema
+// change at precisely the moment someone is trying to add a login method.
+//
+// If you are auditing this schema: no code path reads or writes them, and
+// `PortalAccessToken` below is the mechanism that actually issues portal
+// magic links (D18).
 
 model Account {
   id                String  @id @default(cuid())

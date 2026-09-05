@@ -7,6 +7,7 @@ import { currentBusinessTime } from "../clock";
 import { prisma } from "../db";
 import { isPendingApproval } from "../domain/approval";
 import { NotFoundError } from "../errors";
+import { findSlippedShipments } from "./fulfillment";
 import {
   computeDealHealth,
   RECOMMENDED_ACTIONS,
@@ -173,6 +174,7 @@ export async function scoreDealHealth(quotationId: string): Promise<DealHealthSn
   });
 
   await raiseAlertsFor({ quotationId, result, now });
+  await raiseSlippageAlert({ quotationId, now, severity: result.severity });
 
   return {
     ...result,
@@ -251,6 +253,41 @@ async function raiseAlertsFor(params: {
 
 /** Marks an alert as having been pushed by a human, not merely computed. */
 const ESCALATED_PREFIX = "ESCALATED: ";
+
+/**
+ * A broken delivery promise is its own alert.
+ *
+ * §B9 lists slippage alongside stalled deals and discount anomalies. It is not
+ * a health *penalty* - the frozen rules score delivery on backorder and split
+ * only - but a promise missed is exactly the kind of thing a manager should be
+ * told about without having to open the order.
+ */
+async function raiseSlippageAlert(params: {
+  quotationId: string;
+  now: Date;
+  severity: DealSeverity;
+}): Promise<void> {
+  const slipped = (await findSlippedShipments(params.now)).filter(
+    (sh) => sh.quotationId === params.quotationId,
+  );
+  if (slipped.length === 0) return;
+
+  const existing = await prisma.dealAlert.findFirst({
+    where: { quotationId: params.quotationId, type: "DELIVERY_SLIPPAGE", status: "OPEN" },
+  });
+  if (existing) return;
+
+  const worst = slipped[0];
+  await prisma.dealAlert.create({
+    data: {
+      quotationId: params.quotationId,
+      type: "DELIVERY_SLIPPAGE",
+      severity: params.severity,
+      message: `${worst.shipmentNumber} is ${worst.daysLate} day(s) past its promised date`,
+      createdAt: params.now,
+    },
+  });
+}
 
 export interface EscalationResult {
   alertId: string;

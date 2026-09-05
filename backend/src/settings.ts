@@ -28,6 +28,8 @@ export const SETTING_KEYS = {
   discountFallbackCeiling: "discount.fallbackCeiling",
   upsellMinCoPurchaseSample: "upsell.minCoPurchaseSample",
   invoiceNumberPrefix: "invoice.numberPrefix",
+  creditNoteNumberPrefix: "creditNote.numberPrefix",
+  billingPeriodsAhead: "billing.periodsAhead",
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -49,6 +51,10 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   // co-purchase rate and outrank every genuine one.
   [SETTING_KEYS.upsellMinCoPurchaseSample]: "5",
   [SETTING_KEYS.invoiceNumberPrefix]: "INV",
+  [SETTING_KEYS.creditNoteNumberPrefix]: "CN",
+  // How many future periods a new subscription materialises. Long enough to
+  // show a year of a monthly plan; a yearly plan needs far fewer rows.
+  [SETTING_KEYS.billingPeriodsAhead]: "12",
 };
 
 export const SETTING_DESCRIPTIONS: Record<SettingKey, string> = {
@@ -65,6 +71,9 @@ export const SETTING_DESCRIPTIONS: Record<SettingKey, string> = {
   [SETTING_KEYS.upsellMinCoPurchaseSample]:
     "Minimum orders containing a product before its pairings are trusted.",
   [SETTING_KEYS.invoiceNumberPrefix]: "Prefix for generated invoice numbers.",
+  [SETTING_KEYS.creditNoteNumberPrefix]: "Prefix for generated credit note numbers.",
+  [SETTING_KEYS.billingPeriodsAhead]:
+    "Future billing periods written when a subscription starts.",
 };
 
 export interface ResolvedSettings {
@@ -76,6 +85,8 @@ export interface ResolvedSettings {
   discountFallbackCeiling: Prisma.Decimal;
   upsellMinCoPurchaseSample: number;
   invoiceNumberPrefix: string;
+  creditNoteNumberPrefix: string;
+  billingPeriodsAhead: number;
 }
 
 /**
@@ -112,6 +123,8 @@ export async function getSettings(): Promise<ResolvedSettings> {
     discountFallbackCeiling: new Decimal(raw(map, SETTING_KEYS.discountFallbackCeiling)),
     upsellMinCoPurchaseSample: Number(raw(map, SETTING_KEYS.upsellMinCoPurchaseSample)),
     invoiceNumberPrefix: raw(map, SETTING_KEYS.invoiceNumberPrefix),
+    creditNoteNumberPrefix: raw(map, SETTING_KEYS.creditNoteNumberPrefix),
+    billingPeriodsAhead: Number(raw(map, SETTING_KEYS.billingPeriodsAhead)),
   };
 }
 
@@ -134,6 +147,13 @@ function validate(key: SettingKey, value: string): void {
       }
       return;
     }
+    case SETTING_KEYS.billingPeriodsAhead: {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 120) {
+        throw new ValidationError("Periods ahead must be a whole number from 1 to 120.", key);
+      }
+      return;
+    }
     case SETTING_KEYS.upsellMinCoPurchaseSample: {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > 1000) {
@@ -149,6 +169,7 @@ function validate(key: SettingKey, value: string): void {
       return;
     }
     case SETTING_KEYS.invoiceNumberPrefix:
+    case SETTING_KEYS.creditNoteNumberPrefix:
     case SETTING_KEYS.quoteNumberPrefix:
       if (!/^[A-Za-z0-9-]{1,8}$/.test(value)) {
         throw new ValidationError("Prefix must be 1 to 8 letters, digits or hyphens.", key);

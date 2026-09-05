@@ -39,9 +39,6 @@ import { getSettings } from "../settings";
 
 const Decimal = Prisma.Decimal;
 
-/** How far ahead the schedule is written when a subscription starts. */
-const PERIODS_AHEAD = 12;
-
 // ---------------------------------------------------------------------------
 // Document numbering
 // ---------------------------------------------------------------------------
@@ -80,7 +77,7 @@ export async function createSubscriptionsForOrder(params: {
   if (!quotation) throw new NotFoundError(`Quotation ${params.quotationId} does not exist`);
 
   const now = currentBusinessTime();
-  const { currencyMinorUnits } = await getSettings();
+  const { currencyMinorUnits, billingPeriodsAhead } = await getSettings();
   let created = 0;
 
   for (const line of quotation.lines) {
@@ -107,7 +104,7 @@ export async function createSubscriptionsForOrder(params: {
       quantity: line.quantity,
       startDate: now,
       interval: plan.billingInterval,
-      periods: PERIODS_AHEAD,
+      periods: billingPeriodsAhead,
       minorUnits: currencyMinorUnits,
     });
 
@@ -565,7 +562,7 @@ export async function cancelSubscription(params: {
   }
 
   const now = currentBusinessTime();
-  const { currencyMinorUnits } = await getSettings();
+  const { currencyMinorUnits, creditNoteNumberPrefix, quoteNumberPadding } = await getSettings();
   const period = periodContaining(now, subscription.plan.billingInterval);
 
   // Credit is owed only against a period that was actually invoiced.
@@ -608,10 +605,16 @@ export async function cancelSubscription(params: {
     });
 
     if (creditAmount.greaterThan(0)) {
-      const count = await tx.creditNote.count();
+      // Numbered the same way quotes and invoices are, from configuration
+      // rather than a literal - a document series is exactly the kind of thing
+      // a deployment changes without a code change.
+      const prefix = `${creditNoteNumberPrefix}-${now.getUTCFullYear()}-`;
+      const count = await tx.creditNote.count({
+        where: { creditNoteNumber: { startsWith: prefix } },
+      });
       const note = await tx.creditNote.create({
         data: {
-          creditNoteNumber: `CN-${now.getUTCFullYear()}-${String(count + 1).padStart(4, "0")}`,
+          creditNoteNumber: `${prefix}${String(count + 1).padStart(quoteNumberPadding, "0")}`,
           invoiceId: paidEntry?.invoiceId ?? null,
           subscriptionId: subscription.id,
           amount: creditAmount,

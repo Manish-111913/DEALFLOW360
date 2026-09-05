@@ -294,3 +294,42 @@ export {
   type DealHealthSnapshotResult,
   type EscalationResult,
 } from "./services/deal-health";
+
+export {
+  exportSalesReport,
+  runSalesReport,
+  type ExportedReport,
+  type ExportFormat,
+  type ReportFilters,
+  type ReportRow,
+  type ReportTotals,
+  type SalesReport,
+} from "./services/reporting";
+
+export {
+  dispatchShipment,
+  findSlippedShipments,
+  getFulfillmentView,
+  hasSlipped,
+  recordDelivery,
+  type FulfillmentPlanView,
+  type FulfillmentView,
+  type SlippedShipment,
+} from "./services/fulfillment";
+
+export {
+  getConfigurationOverview,
+  listApprovalChain,
+  listCategories,
+  listDiscountPolicy,
+  listPriceLists,
+  listProducts,
+  listReplenishmentNeeds,
+  listSalesTeams,
+  listSettings,
+  listSubscriptionPlans,
+  listTaxes,
+  listUpsellRules,
+  listWarehouses,
+  type SettingView,
+} from "./services/configuration";
