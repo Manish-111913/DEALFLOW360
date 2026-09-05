@@ -47,8 +47,11 @@ export default defineConfig([
     rules: { "no-restricted-syntax": banSystemClock },
   },
   {
-    // The single exemption: the clock module is where system time enters.
-    files: ["backend/src/clock.ts"],
+    // The only exemptions: the two modules where system time enters. The
+    // backend clock is the authority; the frontend one exists solely to stamp
+    // "just now" on a screen, and is documented to defer to the backend once the
+    // screens are wired to the API.
+    files: ["backend/src/clock.ts", "frontend/src/lib/display-clock.ts"],
     rules: { "no-restricted-syntax": "off" },
   },
 ]);
