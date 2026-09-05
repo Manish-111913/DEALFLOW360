@@ -3,12 +3,12 @@
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import {
-  AgentButton,
   AppShell,
   AppWindow,
   StatusBar,
 } from "@/components/app-shell";
 import { AppDock } from "@/components/app-dock";
+import { DealAssistant } from "@/components/deal-assistant";
 import { CHROME_BAR, PAGE_SUBTITLE, PAGE_TITLE } from "@/components/design-tokens";
 import { ToastProvider, useToastState } from "@/components/toast";
 import { formatCompact, formatRupees } from "@/lib/money";
@@ -226,7 +226,11 @@ function Workspace({
       </AppWindow>
 
       <AppDock />
-      <AgentButton />
+      <DealAssistant
+        quotationId={builder?.quotationId ?? null}
+        screen="sales"
+        subject={builder ? `${builder.quoteNumber} - ${builder.customerName}` : null}
+      />
       <WorkspaceToast />
     </AppShell>
   );

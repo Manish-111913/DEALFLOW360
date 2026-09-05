@@ -1,8 +1,9 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
-import { AgentButton, AppShell, AppWindow, StatusBar } from "@/components/app-shell";
+import { AppShell, AppWindow, StatusBar } from "@/components/app-shell";
 import { AppDock } from "@/components/app-dock";
+import { DealAssistant } from "@/components/deal-assistant";
 import { CHROME_BAR, PAGE_SUBTITLE, PAGE_TITLE, SCROLL_PADDING } from "@/components/design-tokens";
 import { ToastProvider, useToast, useToastState } from "@/components/toast";
 import {
@@ -160,8 +161,17 @@ function Board({ initialRows, denied }: { initialRows: HealthRow[]; denied: bool
         </header>
 
         <main className="flex-1 min-h-0 overflow-hidden flex flex-row relative bg-[#fcfdfe]">
+          {/* Same classes as <WindowScroll>, which the other six screens use -
+              this screen hand-rolls it only because it has a sidebar beside it.
+              Note what is NOT here: `flex flex-col`. It was, and it is what
+              cropped the table. A flex column gives its children
+              flex-shrink: 1, so the table card shrank to whatever height was
+              left instead of the height of its rows; overflow-hidden then cut
+              the rows off, and because nothing overflowed there was nothing to
+              scroll. Block children take their content height and this
+              container scrolls once they exceed it. */}
           <section
-            className={"flex-1 min-h-0 overflow-y-auto app-scroll flex flex-col pb-28 " + SCROLL_PADDING}
+            className={"flex-1 min-h-0 overflow-y-auto app-scroll pb-28 " + SCROLL_PADDING}
           >
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/80 pb-4">
               <div>
@@ -361,7 +371,12 @@ function Board({ initialRows, denied }: { initialRows: HealthRow[]; denied: bool
             )}
           </section>
 
-          <aside className="w-80 md:w-96 border-l border-slate-200 bg-white flex flex-col justify-between shrink-0 shadow-lg z-10 overflow-y-auto app-scroll pb-28">
+          {/* `shrink-0` keeps the drawer from being squeezed by the table
+              beside it, and stays. `flex flex-col justify-between` does not:
+              justify-between does nothing with a single child, while the
+              flex column gave that child flex-shrink: 1 - so a drawer with
+              many alerts compressed instead of scrolling. */}
+          <aside className="w-80 md:w-96 border-l border-slate-200 bg-white shrink-0 shadow-lg z-10 overflow-y-auto app-scroll pb-28">
             {selected ? (
               <DealDrawer
                 busy={busy}
@@ -382,7 +397,11 @@ function Board({ initialRows, denied }: { initialRows: HealthRow[]; denied: bool
       </AppWindow>
 
       <AppDock />
-      <AgentButton />
+      <DealAssistant
+        quotationId={selected?.quotationId ?? null}
+        screen="deal-health"
+        subject={selected ? `${selected.quoteNumber} - ${selected.customerName}` : null}
+      />
     </AppShell>
   );
 }

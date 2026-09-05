@@ -522,7 +522,17 @@ export async function removeQuotationLine(lineId: string, actorId?: string | nul
  * was handed our cost base with it.
  */
 export async function getQuotation(user: AuthzUser, quotationId: string) {
+  // Two different questions, and both have to be asked here.
+  //
+  // The capability check says this kind of user may see costs and margins at
+  // all. It does not say anything about *which* rows - and a SALES_REP holds
+  // "margin" for their own deals, so on its own it let one rep read another
+  // rep's quotation in full. The scope check is what answers that, and it
+  // lives here rather than in the callers because callers forget: the AI
+  // context builder did exactly that, and every route would have to remember
+  // it again.
   assertCan(user, "view", "margin");
+  await assertQuotationVisible(user, quotationId);
 
   return prisma.quotation.findUnique({
     where: { id: quotationId },

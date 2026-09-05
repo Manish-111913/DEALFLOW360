@@ -2,13 +2,13 @@
 
 import Link from "next/link";
 import {
-  AgentButton,
   AppShell,
   AppWindow,
   StatusBar,
   WindowScroll,
 } from "@/components/app-shell";
 import { AppDock } from "@/components/app-dock";
+import { DealAssistant } from "@/components/deal-assistant";
 import { PAGE_SUBTITLE, PAGE_TITLE, SCROLL_PADDING } from "@/components/design-tokens";
 import { ROUTES } from "@/lib/navigation";
 import { formatCompact, formatRupees } from "@/lib/money";
@@ -368,7 +368,11 @@ export function CommandCentreClient({ data }: { data: CommandCentreData }) {
       </AppWindow>
 
       <AppDock />
-      <AgentButton />
+      <DealAssistant
+        quotationId={null}
+        screen="dashboard"
+        subject={null}
+      />
     </AppShell>
   );
 }

@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { AgentButton, AppShell, AppWindow, StatusBar } from "@/components/app-shell";
+import { AppShell, AppWindow, StatusBar } from "@/components/app-shell";
 import { AppDock } from "@/components/app-dock";
+import { DealAssistant } from "@/components/deal-assistant";
 import { CHROME_BAR, PAGE_SUBTITLE, PAGE_TITLE, SCROLL_PADDING } from "@/components/design-tokens";
 import { WindowScroll } from "@/components/app-shell";
 import { ROUTES } from "@/lib/navigation";
@@ -257,7 +258,11 @@ export function ApprovalsClient({
       </AppWindow>
 
       <AppDock />
-      <AgentButton />
+      <DealAssistant
+        quotationId={data?.quotationId ?? null}
+        screen="approvals"
+        subject={data ? `${data.quoteNumber} - ${data.customerName}` : null}
+      />
     </AppShell>
   );
 }

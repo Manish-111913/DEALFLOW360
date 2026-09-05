@@ -3,13 +3,13 @@
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import {
-  AgentButton,
   AppShell,
   AppWindow,
   StatusBar,
   WindowScroll,
 } from "@/components/app-shell";
 import { AppDock } from "@/components/app-dock";
+import { DealAssistant } from "@/components/deal-assistant";
 import { CHROME_BAR, PAGE_SUBTITLE, PAGE_TITLE, SCROLL_PADDING } from "@/components/design-tokens";
 import { ToastProvider, useToast, useToastState } from "@/components/toast";
 import { formatRupees } from "@/lib/money";
@@ -322,7 +322,11 @@ function Fulfillment({ data }: { data: FulfillmentData | null }) {
       </AppWindow>
 
       <AppDock />
-      <AgentButton />
+      <DealAssistant
+        quotationId={data?.quotationId ?? null}
+        screen="fulfillment"
+        subject={data ? `${data.quoteNumber} - ${data.customerName}` : null}
+      />
       <FulfillmentToast />
 
       {overrideOpen && data?.recommended && (

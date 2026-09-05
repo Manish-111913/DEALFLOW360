@@ -105,7 +105,12 @@ export function QuotationBuilder({
 
       <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* Cart and financial summary */}
-        <div className="flex-1 min-h-0 flex flex-col overflow-y-auto app-scroll border-r border-slate-200 p-6 space-y-5 bg-slate-50/50">
+        {/* No `flex flex-col`: it gives children flex-shrink: 1, so the
+            line-items card below (which is overflow-hidden, to clip its own
+            rounded corners) would be squashed to the leftover height and cut
+            its rows off instead of scrolling. Same fault that cropped the
+            deal-health table. */}
+        <div className="flex-1 min-h-0 overflow-y-auto app-scroll border-r border-slate-200 p-6 space-y-5 bg-slate-50/50">
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-200 bg-slate-50/80 flex items-center justify-between">
               <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
@@ -196,7 +201,10 @@ export function QuotationBuilder({
         </div>
 
         {/* Recommendation panel (F-3) */}
-        <div className="w-80 md:w-96 bg-white border-l border-slate-200 flex flex-col shrink-0 min-h-0 overflow-y-auto app-scroll">
+        {/* Same reasoning as the drawer on deal health: shrink-0 keeps the
+            column its width, but a flex column would let a long list of
+            suggestions squash the header above it rather than scroll. */}
+        <div className="w-80 md:w-96 bg-white border-l border-slate-200 shrink-0 min-h-0 overflow-y-auto app-scroll">
           <div className="p-4 border-b border-slate-200 bg-slate-50/80">
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-bold text-slate-900 uppercase tracking-tight">

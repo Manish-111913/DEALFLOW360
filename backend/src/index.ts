@@ -46,6 +46,50 @@ export {
   type WhereFragment,
 } from "./authz/scope";
 
+// ---------------------------------------------------------------------------
+// Deal Intelligence (Gemini). The API key is read only inside ./ai/gemini.
+// ---------------------------------------------------------------------------
+
+export {
+  aiConfigured,
+  aiModel,
+  AiError,
+  AI_FAILURE_MESSAGE,
+  type AiFailure,
+} from "./ai/gemini";
+
+export {
+  answerDealQuestion,
+  nextBestAction,
+  proposeScenarios,
+  summariseDeal,
+  type AssistantRequest,
+  type AssistantTurn,
+  type ComparedScenario,
+} from "./ai/deal-intelligence";
+
+export {
+  buildDealContext,
+  buildPipelineContext,
+  renderDealContext,
+  type DealContext,
+} from "./ai/context";
+
+export {
+  ACTION_KINDS,
+  type ActionKind,
+  type DealSummary,
+  type NextBestAction,
+} from "./ai/schemas";
+
+export {
+  simulateCurrent,
+  simulateQuotation,
+  type ScenarioChange,
+  type SimulatedLine,
+  type SimulationResult,
+} from "./services/simulation";
+
 export { hashPassword, verifyPassword } from "./auth/password";
 
 export {

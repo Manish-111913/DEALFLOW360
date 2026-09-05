@@ -384,7 +384,11 @@ export function LoginClient({
         <main className="flex-1 auth-grid bg-slate-50/50 flex flex-col items-center justify-center p-4 sm:p-8 lg:p-10 relative overflow-y-auto">
           <div className="absolute w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none -top-12" />
 
-          <div className="w-full max-w-[520px] bg-white rounded-2xl shadow-card border border-slate-200/80 p-6 sm:p-8 relative z-10 my-auto">
+          {/* shrink-0 matters here: the card is a flex item in a centred
+                column, so without it the tallest tab (Create Account) is
+                compressed to fit a short window instead of letting the
+                container scroll. my-auto still centres it when it fits. */}
+          <div className="w-full max-w-[520px] shrink-0 bg-white rounded-2xl shadow-card border border-slate-200/80 p-6 sm:p-8 relative z-10 my-auto">
             {/* Brand mark */}
             <div className="text-center mb-6">
               <div className="inline-flex items-center justify-center mb-3.5 relative group">

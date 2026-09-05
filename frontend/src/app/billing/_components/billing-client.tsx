@@ -3,13 +3,13 @@
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import {
-  AgentButton,
   AppShell,
   AppWindow,
   StatusBar,
   WindowScroll,
 } from "@/components/app-shell";
 import { AppDock } from "@/components/app-dock";
+import { DealAssistant } from "@/components/deal-assistant";
 import { CHROME_BAR, PAGE_SUBTITLE, PAGE_TITLE, SCROLL_PADDING } from "@/components/design-tokens";
 import { ToastProvider, useToast, useToastState } from "@/components/toast";
 import { formatRupees, formatRupeesExact } from "@/lib/money";
@@ -285,7 +285,11 @@ function Billing({ data }: { data: BillingData | null }) {
       </AppWindow>
 
       <AppDock />
-      <AgentButton />
+      <DealAssistant
+        quotationId={data?.quotationId ?? null}
+        screen="billing"
+        subject={data ? `${data.quoteNumber} - ${data.customerName}` : null}
+      />
       <BillingToast />
 
       {drawerFor && (
