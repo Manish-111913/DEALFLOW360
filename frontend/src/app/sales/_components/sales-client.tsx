@@ -10,6 +10,7 @@ import {
 import { AppDock } from "@/components/app-dock";
 import { DealAssistant } from "@/components/deal-assistant";
 import { CHROME_BAR, PAGE_SUBTITLE, PAGE_TITLE } from "@/components/design-tokens";
+import { NewQuotationDialog } from "./new-quotation-dialog";
 import { ToastProvider, useToastState } from "@/components/toast";
 import { formatCompact, formatRupees } from "@/lib/money";
 import { QuotationBuilder } from "./quotation-builder";
@@ -81,14 +82,16 @@ export function SalesClient({
   rows,
   pipeline,
   builder,
+  canCreate,
 }: {
   rows: DealRow[];
   pipeline: PipelineSummary;
   builder: BuilderData | null;
+  canCreate: boolean;
 }) {
   return (
     <ToastProvider>
-      <Workspace builder={builder} pipeline={pipeline} rows={rows} />
+      <Workspace builder={builder} canCreate={canCreate} pipeline={pipeline} rows={rows} />
     </ToastProvider>
   );
 }
@@ -97,13 +100,16 @@ function Workspace({
   rows,
   pipeline,
   builder,
+  canCreate,
 }: {
   rows: DealRow[];
   pipeline: PipelineSummary;
   builder: BuilderData | null;
+  canCreate: boolean;
 }) {
   const router = useRouter();
   const [view, setView] = useState<View>("board");
+  const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState("");
   const [busy, startTransition] = useTransition();
 
@@ -155,6 +161,20 @@ function Workspace({
                 operations.
               </p>
             </div>
+
+            {/* The action the whole screen exists to start. */}
+            {canCreate && (
+            <button
+              className="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors"
+              onClick={() => setCreating(true)}
+              type="button"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path d="M12 4v16m8-8H4" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+              </svg>
+              New Quotation
+            </button>
+            )}
           </div>
 
           <div className="flex items-center justify-between mt-3 text-xs">
@@ -220,6 +240,8 @@ function Workspace({
           {builder && (
             <QuotationBuilder data={builder} onClose={() => router.push("/sales")} />
           )}
+
+          {creating && <NewQuotationDialog onClose={() => setCreating(false)} />}
         </div>
 
         <StatusBar />

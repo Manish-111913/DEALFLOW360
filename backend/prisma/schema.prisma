@@ -48,6 +48,7 @@ enum Role {
   ADMIN
 }
 
+
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -61,7 +62,9 @@ model User {
   /// It is also null for an account created through Google, which has no
   /// password of ours to store.
   passwordHash String?
-  /// The employer a self-registering user typed at signup. Free text, because
+  /// The employer a self-registering user TYPED at signup. Free text, and not
+/// the Organization relation below - it is what they told us about
+/// themselves, not the tenant they belong to. Kept because
   /// it is what they told us - it is not the Customer they sell to.
   organization String?
   active       Boolean  @default(true)
@@ -88,16 +91,20 @@ model User {
   @@index([kind])
   @@index([customerId])
   @@index([salesTeamId])
+
+
 }
 
 model SalesTeam {
   id        String   @id @default(cuid())
-  name      String   @unique
+  name      String  @unique
   managerId String?  @unique
   manager   User?    @relation("TeamManager", fields: [managerId], references: [id])
   members   User[]   @relation("TeamMembers")
   createdAt DateTime
   updatedAt DateTime
+
+
 }
 
 // ===========================================================================
@@ -212,7 +219,7 @@ enum CustomerStatus {
 
 model Customer {
   id          String         @id @default(cuid())
-  name        String         @unique
+  name        String  @unique
   contactName String?
   email       String?
   phone       String?
@@ -238,6 +245,8 @@ model Customer {
 
   @@index([tier])
   @@index([assignedSalesRepId])
+
+
 }
 
 // ===========================================================================
@@ -257,6 +266,8 @@ model ProductCategory {
 
   products         Product[]
   discountPolicies DiscountPolicy[]
+
+
 }
 
 /// Tax is stored and applied to invoices, but is deliberately absent from the
@@ -269,11 +280,13 @@ model Tax {
   isActive   Boolean @default(true)
 
   products Product[]
+
+
 }
 
 model Product {
   id          String      @id @default(cuid())
-  sku         String      @unique
+  sku         String  @unique
   name        String
   description String?
   categoryId  String
@@ -304,6 +317,8 @@ model Product {
 
   @@index([categoryId])
   @@index([type])
+
+
 }
 
 /// A2 requires variants with an attribute, a value and an extra price.
@@ -328,7 +343,7 @@ model ProductVariant {
 /// what a customer is charged; that limits how far a rep may discount it.
 model PriceList {
   id       String        @id @default(cuid())
-  name     String        @unique
+  name     String  @unique
   tier     CustomerTier?
   currency String        @default("INR")
   isActive Boolean       @default(true)
@@ -339,6 +354,8 @@ model PriceList {
   items PriceListItem[]
 
   @@index([tier])
+
+
 }
 
 model PriceListItem {
@@ -397,7 +414,7 @@ enum RiskLevel {
 
 model Quotation {
   id          String @id @default(cuid())
-  quoteNumber String @unique
+  quoteNumber String  @unique
   customerId  String
   salesRepId  String
 
@@ -455,6 +472,8 @@ model Quotation {
   @@index([approvalState])
   @@index([status])
   @@index([lastActivityAt])
+
+
 }
 
 model QuotationLine {
@@ -548,13 +567,15 @@ model QuotationVersion {
 /// Without this, a product whose category has no policy row has no ceiling.
 model DiscountTier {
   id                 String       @id @default(cuid())
-  tier               CustomerTier @unique
+  tier               CustomerTier  @unique
   defaultMaxDiscount Decimal      @db.Decimal(5, 2)
   priority           Int          @default(0)
   isActive           Boolean      @default(true)
 
   createdAt DateTime
   updatedAt DateTime
+
+
 }
 
 /// D10 step one — the category-specific override, e.g. Gold/Services = 10%
@@ -577,6 +598,8 @@ model DiscountPolicy {
   // migration. A plain unique key would make the documented
   // deactivate-then-replace workflow impossible, since the old row keeps the key.
   @@index([tier, categoryId])
+
+
 }
 
 /// D11 — the approval chain is configuration, not an if-statement. Seeded to
@@ -589,6 +612,8 @@ model ApprovalChain {
   updatedAt DateTime
 
   steps ApprovalStep[]
+
+
 }
 
 model ApprovalStep {
@@ -697,6 +722,8 @@ model ProductPairing {
   suggestedProduct Product @relation("SuggestedProduct", fields: [suggestedProductId], references: [id], onDelete: Cascade)
 
   @@unique([baseProductId, suggestedProductId])
+
+
 }
 
 enum UpsellStatus {
@@ -749,6 +776,8 @@ model Warehouse {
   allocations FulfillmentAllocation[]
   shipments   Shipment[]
   backorders  Backorder[]
+
+
 }
 
 /// A4 also requires replenishment rules per warehouse, which is why the reorder
@@ -869,7 +898,7 @@ enum ShipmentStatus {
 
 model Shipment {
   id             String         @id @default(cuid())
-  shipmentNumber String         @unique
+  shipmentNumber String  @unique
   quotationId    String
   warehouseId    String
   status         ShipmentStatus @default(PENDING)
@@ -886,6 +915,8 @@ model Shipment {
   warehouse Warehouse @relation(fields: [warehouseId], references: [id])
 
   @@index([quotationId])
+
+
 }
 
 enum BackorderStatus {
@@ -927,7 +958,7 @@ enum BillingInterval {
 
 model SubscriptionPlan {
   id              String          @id @default(cuid())
-  name            String          @unique
+  name            String  @unique
   productId       String?
   billingInterval BillingInterval
   price           Decimal         @db.Decimal(14, 2)
@@ -943,6 +974,8 @@ model SubscriptionPlan {
   product        Product?        @relation(fields: [productId], references: [id])
   subscriptions  Subscription[]
   quotationLines QuotationLine[]
+
+
 }
 
 enum SubscriptionStatus {
@@ -1031,7 +1064,7 @@ enum InvoiceStatus {
 
 model Invoice {
   id            String        @id @default(cuid())
-  invoiceNumber String        @unique
+  invoiceNumber String  @unique
   quotationId   String
   customerId    String
   invoiceType   InvoiceType
@@ -1061,6 +1094,8 @@ model Invoice {
   @@index([quotationId])
   @@index([customerId])
   @@index([status])
+
+
 }
 
 model InvoiceLine {
@@ -1119,7 +1154,7 @@ enum CreditNoteStatus {
 /// the business rules issue a pro-rata credit note, never a cash refund.
 model CreditNote {
   id               String           @id @default(cuid())
-  creditNoteNumber String           @unique
+  creditNoteNumber String  @unique
   invoiceId        String?
   subscriptionId   String?
   amount           Decimal          @db.Decimal(14, 2)
@@ -1134,6 +1169,8 @@ model CreditNote {
 
   @@index([invoiceId])
   @@index([subscriptionId])
+
+
 }
 
 // ===========================================================================
@@ -1330,6 +1367,8 @@ model AuditLog {
 
   @@index([entityName, entityId])
   @@index([actorId])
+
+
 }
 
 // ===========================================================================
@@ -1349,6 +1388,8 @@ model SystemSetting {
   description String?
   updatedAt   DateTime
   updatedBy   String?
+
+
 }
 
 // ===========================================================================

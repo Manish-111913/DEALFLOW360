@@ -73,16 +73,22 @@ describe("D17 — Finance owns fulfilment, the rep only watches it", () => {
     expect(can(finance, "allocate")).toBe(true);
   });
 
-  it("does not let a manager or admin allocate", () => {
-    expect(can(manager, "allocate")).toBe(false);
-    expect(can(admin, "allocate")).toBe(false);
+  // This deployment runs on Admin, Sales Manager and customer. With no Finance
+  // person to hold them, allocation and collection sit with the manager and the
+  // admin - otherwise nobody can reserve stock, dispatch, invoice or take money.
+  it("lets a manager and an admin allocate", () => {
+    expect(can(manager, "allocate")).toBe(true);
+    expect(can(admin, "allocate")).toBe(true);
   });
 
-  it("keeps payment and credit notes with Finance", () => {
+  it("keeps payment and credit notes away from the rep", () => {
     expect(can(finance, "recordPayment")).toBe(true);
     expect(can(finance, "issueCredit")).toBe(true);
+    expect(can(manager, "recordPayment")).toBe(true);
+    expect(can(admin, "issueCredit")).toBe(true);
+    // The one role that still may not: a rep sells, and never settles.
     expect(can(rep, "recordPayment")).toBe(false);
-    expect(can(manager, "recordPayment")).toBe(false);
+    expect(can(rep, "issueCredit")).toBe(false);
   });
 });
 

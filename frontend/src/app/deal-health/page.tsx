@@ -1,4 +1,4 @@
-import { getDealHealthDashboard } from "@dealflow/backend";
+import { can, getDealHealthDashboard } from "@dealflow/backend";
 import { requireInternalUser } from "@/auth";
 import { DealHealthClient } from "./_components/deal-health-client";
 import type { HealthRow } from "./_components/deal-rows";
@@ -41,5 +41,11 @@ export default async function DealHealthPage() {
     }
   }
 
-  return <DealHealthClient denied={denied} initialRows={rows} />;
+  // Escalating and resolving are the same capability, and only a Sales Manager
+  // holds it - Finance and Admin can read this board but not act on it. The
+  // screen offered both buttons to everyone and let the endpoint answer 403,
+  // which reads as a broken button rather than as a boundary.
+  return (
+    <DealHealthClient canAct={can(user, "escalate")} denied={denied} initialRows={rows} />
+  );
 }

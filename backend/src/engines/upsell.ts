@@ -77,11 +77,30 @@ function marginPercentageOf(unitPrice: Decimal, unitCost: Decimal): Decimal {
  * the same list — a suggestion panel that reshuffles on refresh reads as random
  * even when it is not.
  */
+/**
+ * The parts of the score a company can turn off.
+ *
+ * Each of these is a real input to the ranking, not a label: with `useHistory`
+ * off the co-purchase term drops out and only configured rates and margin
+ * decide the order; with `usePromoted` off a promoted product loses its bonus
+ * and has to earn its place; `minMarginPercentage` is a floor applied on top of
+ * each pairing's own, so raising it removes suggestions rather than reordering
+ * them. Every field is optional and defaults to today's behaviour.
+ */
+export interface UpsellPolicy {
+  useHistory?: boolean;
+  usePromoted?: boolean;
+  minMarginPercentage?: DecimalValue;
+}
+
 export function rankUpsells(
   candidates: UpsellCandidateInput[],
-  options?: { limit?: number },
+  options?: { limit?: number; policy?: UpsellPolicy },
 ): UpsellSuggestion[] {
   const limit = options?.limit ?? MAX_SUGGESTIONS;
+  const useHistory = options?.policy?.useHistory ?? true;
+  const usePromoted = options?.policy?.usePromoted ?? true;
+  const companyFloor = new Decimal(options?.policy?.minMarginPercentage ?? 0);
   const wCoPurchase = new Decimal(UPSELL_WEIGHTS.coPurchase);
   const wMargin = new Decimal(UPSELL_WEIGHTS.margin);
   const boost = new Decimal(UPSELL_WEIGHTS.promotionBoost);
@@ -92,8 +111,12 @@ export function rankUpsells(
       const unitPrice = new Decimal(c.unitPrice);
       const unitCost = new Decimal(c.unitCost);
       const quantity = c.suggestedQuantity ?? 1;
-      const rate = new Decimal(c.coPurchaseRate);
-      const floor = new Decimal(c.minMarginPercentage);
+      // With history off the co-purchase term contributes nothing, so ranking
+      // falls to margin and promotion alone.
+      const rate = useHistory ? new Decimal(c.coPurchaseRate) : new Decimal(0);
+      // Whichever floor is higher wins: a company-wide minimum can only tighten
+      // a pairing's own, never loosen it.
+      const floor = Decimal.max(new Decimal(c.minMarginPercentage), companyFloor);
       const marginPercentage = marginPercentageOf(unitPrice, unitCost);
 
       return { c, unitPrice, unitCost, quantity, rate, floor, marginPercentage };
@@ -103,7 +126,7 @@ export function rankUpsells(
     .filter((x) => !x.marginPercentage.lessThan(x.floor))
     .map((x) => {
       const normalisedMargin = Decimal.min(new Decimal(1), x.marginPercentage.dividedBy(ceiling));
-      const promotionPoints = x.c.isPromoted ? boost : new Decimal(0);
+      const promotionPoints = x.c.isPromoted && usePromoted ? boost : new Decimal(0);
       const score = x.rate
         .times(wCoPurchase)
         .plus(normalisedMargin.times(wMargin))

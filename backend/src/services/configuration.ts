@@ -94,6 +94,12 @@ export async function listApprovalChain() {
 
 /** §A4 - warehouses, their stock, and their replenishment rules. */
 export async function listWarehouses() {
+  const configured = await getSettings();
+  const defaults = {
+    reorderLevel: configured.fulfilmentReorderLevel,
+    reorderQuantity: configured.fulfilmentReorderQuantity,
+  };
+
   const warehouses = await prisma.warehouse.findMany({
     orderBy: { priority: "asc" },
     include: {
@@ -121,12 +127,17 @@ export async function listWarehouses() {
       available: row.availableQuantity,
       reserved: row.reservedQuantity,
       free: Math.max(0, row.availableQuantity - row.reservedQuantity),
-      reorderLevel: row.reorderLevel,
-      reorderQuantity: row.reorderQuantity,
+      // A stock row's own level wins; the company-wide default applies to rows
+      // that set none, which is what makes the Settings figure do something
+      // rather than sit in a table nobody reads.
+      reorderLevel: row.reorderLevel > 0 ? row.reorderLevel : defaults.reorderLevel,
+      reorderQuantity:
+        row.reorderQuantity > 0 ? row.reorderQuantity : defaults.reorderQuantity,
       /** §A4 replenishment: below the reorder point and worth restocking. */
       needsReplenishment:
-        row.reorderLevel > 0 &&
-        row.availableQuantity - row.reservedQuantity <= row.reorderLevel,
+        (row.reorderLevel > 0 ? row.reorderLevel : defaults.reorderLevel) > 0 &&
+        row.availableQuantity - row.reservedQuantity <=
+          (row.reorderLevel > 0 ? row.reorderLevel : defaults.reorderLevel),
     })),
   }));
 }
@@ -226,6 +237,15 @@ export async function listSettings(): Promise<SettingView[]> {
     [SETTING_KEYS.invoiceNumberPrefix]: effective.invoiceNumberPrefix,
     [SETTING_KEYS.creditNoteNumberPrefix]: effective.creditNoteNumberPrefix,
     [SETTING_KEYS.billingPeriodsAhead]: String(effective.billingPeriodsAhead),
+    [SETTING_KEYS.fulfilmentRanking]: effective.fulfilmentRanking,
+    [SETTING_KEYS.fulfilmentBackorders]: String(effective.fulfilmentBackorders),
+    [SETTING_KEYS.fulfilmentReorderLevel]: String(effective.fulfilmentReorderLevel),
+    [SETTING_KEYS.fulfilmentReorderQuantity]: String(effective.fulfilmentReorderQuantity),
+    [SETTING_KEYS.upsellUseHistory]: String(effective.upsellUseHistory),
+    [SETTING_KEYS.upsellUsePromoted]: String(effective.upsellUsePromoted),
+    [SETTING_KEYS.upsellMinMargin]: effective.upsellMinMargin.toFixed(2),
+    [SETTING_KEYS.reportingDefaultPeriodDays]: String(effective.reportingDefaultPeriodDays),
+    [SETTING_KEYS.reportingDefaultStates]: effective.reportingDefaultStates.join(","),
   };
 
   return (Object.values(SETTING_KEYS) as SettingKey[]).map((key) => ({

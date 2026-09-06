@@ -1,6 +1,6 @@
 import type { CustomerTier } from "../generated/prisma/enums";
 import type { AuthzUser } from "../authz/roles";
-import { can } from "../authz/roles";
+import { assertCan, can } from "../authz/roles";
 import { scopeFor } from "../authz/scope";
 import { appendAudit } from "../audit";
 import { currentBusinessTime } from "../clock";
@@ -151,4 +151,56 @@ export async function createCustomer(input: CreateCustomerInput) {
   });
 
   return customer;
+}
+
+/** One row in the customer picker on the New Quotation dialog. */
+export interface QuotableCustomer {
+  id: string;
+  name: string;
+  tier: string | null;
+  status: string;
+  /** The rep this account belongs to, when one is assigned. */
+  accountOwnerId: string | null;
+}
+
+/**
+ * Customers this user may raise a quotation for.
+ *
+ * Deliberately not every customer in the database. A rep sees the accounts
+ * assigned to them plus unassigned ones they could pick up; managers, finance
+ * and admins see all of them. That mirrors the row scope the rest of the
+ * application applies to quotations, so the picker cannot offer an account the
+ * resulting quote would then be invisible on.
+ *
+ * The same two conditions `assertCustomerCanBeQuoted` enforces are applied
+ * here - active, and with a tier set - so the picker cannot offer an account
+ * that the create call would then refuse. A tier-less customer is genuinely
+ * unquotable: discount ceilings are resolved from the tier, and without one
+ * every ceiling check would silently pass.
+ */
+export async function listQuotableCustomers(user: AuthzUser): Promise<QuotableCustomer[]> {
+  assertCan(user, "create", "quotation");
+
+  const seesEveryAccount =
+    user.role === "SALES_MANAGER" || user.role === "FINANCE_OPS" || user.role === "ADMIN";
+
+  const rows = await prisma.customer.findMany({
+    where: {
+      status: "ACTIVE",
+      tier: { not: null },
+      ...(seesEveryAccount
+        ? {}
+        : { OR: [{ assignedSalesRepId: user.id }, { assignedSalesRepId: null }] }),
+    },
+    orderBy: { name: "asc" },
+    select: { id: true, name: true, tier: true, status: true, assignedSalesRepId: true },
+  });
+
+  return rows.map((c) => ({
+    id: c.id,
+    name: c.name,
+    tier: c.tier,
+    status: c.status,
+    accountOwnerId: c.assignedSalesRepId,
+  }));
 }

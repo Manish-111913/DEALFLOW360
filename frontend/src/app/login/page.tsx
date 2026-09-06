@@ -7,7 +7,9 @@ import {
 } from "@dealflow/backend";
 import { getCurrentUser, googleConfigured } from "@/auth";
 import { ROUTES } from "@/lib/navigation";
+import { portalOnly } from "@/lib/surface";
 import { LoginClient, type AuthTab } from "./_components/login-client";
+import { PortalSignIn } from "./_components/portal-signin";
 
 const TABS: AuthTab[] = ["signin", "signup", "forgot", "reset"];
 
@@ -35,9 +37,16 @@ export default async function LoginPage({
   }>;
 }) {
   const user = await getCurrentUser();
-  if (user) redirect(user.kind === "PORTAL" ? ROUTES.negotiation : ROUTES.home);
+  if (user) redirect(user.kind === "PORTAL" ? ROUTES.customerHome : ROUTES.home);
 
   const { tab, token, error, callbackUrl } = await searchParams;
+
+  // The customer portal's own origin gets a customer's sign-in screen. A
+  // password form, a sign-up tab and a Google button are three things a portal
+  // visitor cannot use - they hold no password with us by design (D18).
+  if (portalOnly()) {
+    return <PortalSignIn reason={callbackUrl ? "expired" : "required"} />;
+  }
 
   const rejection = error as GoogleRejection | undefined;
   const errorMessage =

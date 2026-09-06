@@ -11,6 +11,7 @@ import {
   recomputeAllDealHealth,
   repRollingAverageDiscount,
   resolveAlert,
+  resolveAlertAs,
   scoreDealHealth,
 } from "./deal-health";
 import { addQuotationLine, createQuotation } from "./quotations";
@@ -325,5 +326,63 @@ describe("the dashboard", () => {
 
   it("is refused to a rep", async () => {
     await expect(getDealHealthDashboard({ user: rep })).rejects.toBeInstanceOf(ForbiddenError);
+  });
+});
+
+describe("closing an alert through the product", () => {
+  it("resolves it and drops it off the board", async () => {
+    const { quotationId } = await stalledDeal();
+    await scoreDealHealth(quotationId);
+
+    const before = (await getDealHealthDashboard({ user: manager })).find(
+      (r) => r.quotationId === quotationId,
+    )!;
+    expect(before.openAlerts.length).toBeGreaterThan(0);
+
+    const owner = await resolveAlertAs(manager, before.openAlerts[0].id);
+    expect(owner).toBe(quotationId);
+
+    const after = (await getDealHealthDashboard({ user: manager })).find(
+      (r) => r.quotationId === quotationId,
+    )!;
+    expect(after.openAlerts.length).toBe(before.openAlerts.length - 1);
+  });
+
+  it("refuses a rep, who holds no escalate capability", async () => {
+    const { quotationId } = await stalledDeal();
+    await scoreDealHealth(quotationId);
+    const row = (await getDealHealthDashboard({ user: manager })).find(
+      (r) => r.quotationId === quotationId,
+    )!;
+
+    await expect(resolveAlertAs(rep, row.openAlerts[0].id)).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("refuses an alert on a deal outside the caller's scope", async () => {
+    // A manager is scoped to their own team. The primitive updates by alert id
+    // alone, so without the wrapper this would silently close another team's
+    // alert - which is exactly what the wrapper exists to stop.
+    const { quotationId } = await stalledDeal();
+    await scoreDealHealth(quotationId);
+    const row = (await getDealHealthDashboard({ user: manager })).find(
+      (r) => r.quotationId === quotationId,
+    )!;
+
+    const outsider: AuthzUser = {
+      id: rahulId,
+      kind: "INTERNAL",
+      role: "SALES_MANAGER",
+      customerId: null,
+      // A team nobody is on, so their scope contains nothing of Priya's.
+      salesTeamId: "team-that-does-not-exist",
+    };
+
+    await expect(resolveAlertAs(outsider, row.openAlerts[0].id)).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+
+  it("refuses an alert that does not exist", async () => {
+    await expect(resolveAlertAs(manager, "nope")).rejects.toMatchObject({ status: 404 });
   });
 });

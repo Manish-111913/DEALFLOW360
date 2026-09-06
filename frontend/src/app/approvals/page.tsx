@@ -1,9 +1,9 @@
 import {
-  assertQuotationVisible,
+  assertQuotationDecidable,
   currentBusinessTime,
   getApprovalOverview,
   getQuotation,
-  listQuotations,
+  listDecisionQueue,
 } from "@dealflow/backend";
 import { requireInternalUser } from "@/auth";
 import { ApprovalsClient } from "./_components/approvals-client";
@@ -42,14 +42,12 @@ export default async function ApprovalsPage({
   const { id } = await searchParams;
   const now = currentBusinessTime();
 
-  const pending = await listQuotations(user, { stage: "PENDING_APPROVAL" });
-  const queue: QueueEntry[] = pending.map((row) => ({
-    id: row.id,
-    quoteNumber: row.quoteNumber,
-    customerName: row.customerName,
-    totalAmount: row.totalAmount,
-    riskScore: row.riskScore,
-  }));
+  /**
+   * The reviewer's desk: their own pending deals, plus the ones they have been
+   * asked to decide that sit outside their book. The merge and the reason it is
+   * safe live in `listDecisionQueue`, next to the scope rule it widens.
+   */
+  const queue: QueueEntry[] = await listDecisionQueue(user);
 
   // listQuotations sorts by most recent activity, so the last entry is the one
   // that has been waiting longest - the right default for a review queue.
@@ -59,7 +57,8 @@ export default async function ApprovalsPage({
     return <ApprovalsClient data={null} queue={queue} />;
   }
 
-  await assertQuotationVisible(user, chosenId);
+  // Visible because it is theirs, or because it is theirs to decide.
+  await assertQuotationDecidable(user, chosenId);
 
   const [overview, quotation] = await Promise.all([
     getApprovalOverview(user, chosenId),

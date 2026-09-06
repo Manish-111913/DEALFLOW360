@@ -7,7 +7,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev:internal": "tsx scripts/dev-surface.ts internal",
+    "dev:portal": "tsx scripts/dev-surface.ts portal",
+    "dev:both": "tsx scripts/dev-surface.ts both"
   },
   "dependencies": {
     "@dealflow/backend": "*",

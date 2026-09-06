@@ -1,5 +1,7 @@
 "use client";
 
+import { useShellStatus } from "@/lib/use-shell-status";
+
 /**
  * The window shell every screen sits in.
  *
@@ -96,16 +98,45 @@ export function WindowScroll({
  * Encrypted" block, a version number in three different greys. There is nothing
  * to decide per screen, so there is nothing to pass.
  */
+/** The symbol for the codes this deployment can actually be set to. */
+const CURRENCY_SYMBOL: Record<string, string> = {
+  INR: "₹",
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  JPY: "¥",
+};
+
 export function StatusBar() {
+  /**
+   * These used to be three literals in the markup, and two of them were lies.
+   *
+   * "Currency: INR (₹)" stayed rupees however the currency setting was changed,
+   * and "Sync: Live (0.2s)" claimed a live connection whether or not the socket
+   * was up - including when the realtime hub was not running at all. A status
+   * bar that reports a fixed string is worse than one that reports nothing,
+   * because people read it and believe it.
+   */
+  const { currencyCode, connected } = useShellStatus();
+  const symbol = currencyCode ? (CURRENCY_SYMBOL[currencyCode] ?? currencyCode) : null;
+
   return (
     <footer className="h-8 shrink-0 border-t border-slate-200/80 px-4 bg-slate-50 flex items-center justify-between text-[11px] text-slate-500 select-none z-10">
       <div className="flex items-center gap-2">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-        <span>Database: Connected (Asia-South-1)</span>
+        <span
+          className={
+            "w-1.5 h-1.5 rounded-full " + (connected ? "bg-emerald-500" : "bg-slate-300")
+          }
+        />
+        <span>Database: Connected</span>
         <span className="text-slate-300">·</span>
-        <span>Currency: INR (₹)</span>
+        <span>Currency: {currencyCode ? `${currencyCode} (${symbol})` : "—"}</span>
         <span className="text-slate-300">·</span>
-        <span>Sync: Live (0.2s)</span>
+        {/* Says what is true. The hub is a separate process, and it is genuinely
+            useful to see at a glance that it is not running. */}
+        <span className={connected ? "" : "text-slate-400"}>
+          {connected ? "Sync: Live" : "Sync: Offline"}
+        </span>
       </div>
       <span className="font-jetbrains text-slate-600">DealFlow360 v4.2.8 Enterprise</span>
     </footer>

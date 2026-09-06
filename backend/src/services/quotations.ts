@@ -809,7 +809,46 @@ export async function assertQuotationVisible(
     select: { id: true },
   });
 
+  if (visible) return;
+
+  /**
+   * A reviewer can see what they have been asked to decide.
+   *
+   * Ownership is not the only reason to be allowed to read a quotation. A Sales
+   * Manager is scoped to their own team, so a deal raised outside it that routes
+   * to them for approval was invisible to the very person the routing engine
+   * named - and, because Admin holds no `decide` capability, a quote raised by
+   * an admin ended up with every role that could decide it unable to see it and
+   * the one role that could see it unable to decide. It sat pending for ever.
+   *
+   * Being asked is the grant, and it is deliberately narrow: the request must
+   * still be PENDING, its step must belong to this user's role, and if it names
+   * an assignee it must be this user. That admits exactly the deals that would
+   * otherwise be stuck and nothing else.
+   *
+   * It lives here, rather than in the approvals screen, for the reason the
+   * comment above says the scope check lives in `getQuotation`: callers forget.
+   */
+  if (user.kind === "INTERNAL" && (user.role === "SALES_MANAGER" || user.role === "FINANCE_OPS")) {
+    const mine = await prisma.approvalRequest.count({
+      where: {
+        quotationId,
+        status: "PENDING",
+        step: { approverRole: user.role },
+      // Narrow on purpose. `assignedToId` is never populated - nothing in the
+      // codebase writes it - so matching "unassigned" would match every pending
+      // request of this role and hand a manager the other team's book. The only
+      // deals that genuinely need this widening are the orphans: a quotation
+      // whose owner belongs to no sales team is inside no team-scoped manager's
+      // view, so without this nobody could ever decide it. Everything else stays
+      // where D6 put it.
+      quotation: { salesRep: { salesTeamId: null } },
+      },
+    });
+    if (mine > 0) return;
+  }
+
   // Deliberately "not found" rather than "forbidden": telling an unauthorised
   // caller that a record exists is itself a disclosure.
-  if (!visible) throw new NotFoundError(`Quotation ${quotationId} does not exist`);
+  throw new NotFoundError(`Quotation ${quotationId} does not exist`);
 }

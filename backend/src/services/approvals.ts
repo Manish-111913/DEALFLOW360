@@ -2,14 +2,17 @@ import { Prisma } from "../generated/prisma/client";
 import type { ApprovalState, Role } from "../generated/prisma/enums";
 import { appendAudit } from "../audit";
 import { assertCan, type AuthzUser } from "../authz/roles";
+import { isDenyAll, scopeFor } from "../authz/scope";
 import { currentBusinessTime } from "../clock";
 import { prisma } from "../db";
 import { isPendingApproval } from "../domain/approval";
+import { publishDealEvent } from "../realtime/events";
 import { ConflictError, NotFoundError, ValidationError } from "../errors";
 import {
   resolveApprovalRoute,
   type ApprovalStepConfig,
 } from "../engines/approval-routing";
+import { assertQuotationVisible } from "./quotations";
 import { snapshotQuotation } from "./quotation-versions";
 
 /**
@@ -244,6 +247,27 @@ async function transition(params: {
       createdById: params.actorId,
       approved: true,
     });
+
+    /**
+     * The seller has answered, so the round the customer opened is over.
+     *
+     * Without this the portal deadlocked. `portalStatusFor` reports an open
+     * negotiation as "Under Negotiation", which ranks above "Ready to Confirm",
+     * and the portal only offers the Confirm button on "Ready to Confirm" - so
+     * a customer who asked for a discount and got it was still shown "Under
+     * Negotiation" with Confirm greyed out. The only code that closed a
+     * negotiation was `confirmQuotation` itself, the very act being blocked:
+     * the negotiation could not close until the customer confirmed, and the
+     * customer could not confirm until the negotiation closed.
+     *
+     * Approval is the right place to close it because approval IS the answer.
+     * A rejection deliberately does not close anything - those terms were
+     * refused, and the conversation is still open.
+     */
+    await prisma.negotiation.updateMany({
+      where: { quotationId: params.quotationId, status: "OPEN" },
+      data: { status: "CLOSED", closedAt: params.now },
+    });
   }
 
   await appendAudit({
@@ -287,7 +311,14 @@ export async function decideApproval(params: {
 }): Promise<DecisionResult> {
   const request = await prisma.approvalRequest.findUnique({
     where: { id: params.requestId },
-    include: { step: true, quotation: { select: { id: true, quoteNumber: true } } },
+    include: {
+      step: true,
+      // customerId and salesRepId are carried so a decision can be announced
+      // to exactly the people entitled to hear it.
+      quotation: {
+        select: { id: true, quoteNumber: true, customerId: true, salesRepId: true },
+      },
+    },
   });
   if (!request) throw new NotFoundError(`Approval request ${params.requestId} does not exist`);
 
@@ -352,6 +383,15 @@ export async function decideApproval(params: {
       reason,
       now,
     });
+    // A rejection or return is a decision the customer is waiting on too.
+    await publishDealEvent({
+      type: "APPROVAL_COMPLETED",
+      quotationId: request.quotationId,
+      customerId: request.quotation.customerId,
+      salesRepId: request.quotation.salesRepId,
+      at: now.getTime(),
+    });
+
     return { approvalState: to, requestStatus: status, nextApprover: null };
   }
 
@@ -376,6 +416,17 @@ export async function decideApproval(params: {
     approvedAt: to === "APPROVED" ? now : undefined,
   });
 
+  // `APPROVAL_COMPLETED` when the quotation is through the whole chain, and
+  // `APPROVAL_REQUIRED` when one desk has cleared it and the next now owns it -
+  // which is a different thing for the next reviewer's queue to hear about.
+  await publishDealEvent({
+    type: to === "APPROVED" ? "APPROVAL_COMPLETED" : "APPROVAL_REQUIRED",
+    quotationId: request.quotationId,
+    customerId: request.quotation.customerId,
+    salesRepId: request.quotation.salesRepId,
+    at: now.getTime(),
+  });
+
   return {
     approvalState: to,
     requestStatus: status,
@@ -390,6 +441,126 @@ export async function decideApproval(params: {
  * customer's to read - so the caller is asserted here rather than trusted to
  * have been asserted upstream (D20).
  */
+/**
+ * The quotations this user is actually being asked to decide.
+ *
+ * This exists because the approval queue was built from the ownership row scope
+ * - `listQuotations(user, { stage: "PENDING_APPROVAL" })` - and owning a deal
+ * and being asked to approve one are different questions. A Sales Manager is
+ * scoped to their own team, so a quotation raised by anyone outside it was
+ * routed to them for a decision they could not open. Seen from the database it
+ * was unambiguous: every role that had to decide one such quote could not see
+ * it, and the only role that could see it had no `decide` capability. The deal
+ * sat PENDING_MANAGER with nobody on earth able to move it.
+ *
+ * Being asked to decide something is itself the grant. It is a narrow one - the
+ * request must be PENDING, its step must belong to this user's role, and if it
+ * names an assignee it must be this user - so it widens sight to exactly the
+ * deals that would otherwise be stuck, and not one more.
+ */
+export async function listAwaitingDecision(user: AuthzUser): Promise<string[]> {
+  if (user.kind !== "INTERNAL" || !user.role) return [];
+  // Only the two reviewing roles are ever put on a step, so nobody else can
+  // acquire sight of a deal this way.
+  if (user.role !== "SALES_MANAGER" && user.role !== "FINANCE_OPS") return [];
+
+  const requests = await prisma.approvalRequest.findMany({
+    where: {
+      status: "PENDING",
+      step: { approverRole: user.role },
+      // Narrow on purpose. `assignedToId` is never populated - nothing in the
+      // codebase writes it - so matching "unassigned" would match every pending
+      // request of this role and hand a manager the other team's book. The only
+      // deals that genuinely need this widening are the orphans: a quotation
+      // whose owner belongs to no sales team is inside no team-scoped manager's
+      // view, so without this nobody could ever decide it. Everything else stays
+      // where D6 put it.
+      quotation: {
+        // A decided or cancelled quotation is not awaiting anything, whatever
+        // its stale requests say.
+        approvalState: { in: ["PENDING_MANAGER", "PENDING_FINANCE"] },
+        salesRep: { salesTeamId: null },
+      },
+    },
+    select: { quotationId: true },
+  });
+
+  return [...new Set(requests.map((request) => request.quotationId))];
+}
+
+export interface DecisionQueueRow {
+  id: string;
+  quoteNumber: string;
+  customerName: string;
+  totalAmount: string;
+  riskScore: string;
+}
+
+/**
+ * Everything on this reviewer's desk: their own pending deals, plus the ones
+ * they have been asked to decide that belong to someone else's book.
+ *
+ * Merged here rather than in the page because the second half is a deliberate
+ * widening of row scope, and a widening of scope should live next to the rule
+ * that justifies it - not in a React component where the next person to touch
+ * the screen would have to rediscover why it is safe.
+ */
+export async function listDecisionQueue(user: AuthzUser): Promise<DecisionQueueRow[]> {
+  assertCan(user, "view", "quotation");
+
+  const scope = scopeFor(user, "Quotation");
+  const awaitingMe = await listAwaitingDecision(user);
+
+  const rows = await prisma.quotation.findMany({
+    where: {
+      approvalState: { in: ["PENDING_MANAGER", "PENDING_FINANCE"] },
+      OR: [
+        // Theirs to see...
+        ...(isDenyAll(scope) ? [] : [scope as Prisma.QuotationWhereInput]),
+        // ...or theirs to decide.
+        ...(awaitingMe.length > 0 ? [{ id: { in: awaitingMe } }] : []),
+      ],
+    },
+    orderBy: { lastActivityAt: "desc" },
+    select: {
+      id: true,
+      quoteNumber: true,
+      totalAmount: true,
+      riskScore: true,
+      customer: { select: { name: true } },
+    },
+  });
+
+  return rows.map((row) => ({
+    id: row.id,
+    quoteNumber: row.quoteNumber,
+    customerName: row.customer.name,
+    totalAmount: row.totalAmount.toFixed(2),
+    riskScore: row.riskScore.toFixed(2),
+  }));
+}
+
+/**
+ * Read one quotation for the approvals screen.
+ *
+ * Visible either because it is in the caller's own book, or because they are the
+ * one being asked to decide it. `assertQuotationVisible` alone answers only the
+ * first, which is why an approver met a 404 on the very deal sitting in their
+ * queue.
+ */
+export async function assertQuotationDecidable(
+  user: AuthzUser,
+  quotationId: string,
+): Promise<void> {
+  try {
+    await assertQuotationVisible(user, quotationId);
+    return;
+  } catch (error) {
+    const awaiting = await listAwaitingDecision(user);
+    if (!awaiting.includes(quotationId)) throw error;
+  }
+}
+
 export async function getApprovalOverview(user: AuthzUser, quotationId: string) {
   assertCan(user, "view", "riskDetail");
 

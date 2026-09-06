@@ -178,6 +178,40 @@ const CONFIDENCE_STYLE: Record<NextBestAction["confidence"], string> = {
   low: "bg-slate-100 text-slate-600 border-slate-200",
 };
 
+/**
+ * Where each recommended action is actually carried out.
+ *
+ * The model returns a `kind` from a closed enum precisely so the screen can do
+ * something with it, and for a long time nothing did - the field was fetched,
+ * typed, and dropped, leaving a card that told you what to do and then made you
+ * find it yourself.
+ *
+ * What this deliberately does NOT do is perform the action. Approving a deal or
+ * changing a discount is a decision with a named human behind it in the audit
+ * trail; a button that let the assistant take it would put the model there
+ * instead. So each kind maps to the screen that owns the decision, with the deal
+ * already open, and a person still makes it.
+ *
+ * Exhaustive by type: adding a kind to ACTION_KINDS without deciding where it
+ * leads fails the build here rather than silently rendering nothing.
+ */
+const ACTION_DESTINATION: Record<NextBestAction["kind"], { label: string; href: (id: string) => string } | null> = {
+  review_discount: { label: "Open in the deal builder", href: (id) => `/sales?open=${id}` },
+  reduce_discount: { label: "Open in the deal builder", href: (id) => `/sales?open=${id}` },
+  remove_low_margin_item: { label: "Open in the deal builder", href: (id) => `/sales?open=${id}` },
+  send_revised_quotation: { label: "Open in the deal builder", href: (id) => `/sales?open=${id}` },
+  add_upsell: { label: "Open in the deal builder", href: (id) => `/sales?open=${id}` },
+  request_approval: { label: "Go to approvals", href: (id) => `/approvals?id=${id}` },
+  escalate_stalled_deal: { label: "Go to Deal Health", href: () => "/deal-health" },
+  review_allocation: { label: "Go to fulfilment", href: (id) => `/fulfillment?id=${id}` },
+  resolve_backorder: { label: "Go to fulfilment", href: (id) => `/fulfillment?id=${id}` },
+  review_subscription: { label: "Go to billing", href: (id) => `/billing?id=${id}` },
+  contact_customer: { label: "Open the customer thread", href: () => "/negotiation" },
+  follow_up: { label: "Open the customer thread", href: () => "/negotiation" },
+  // Nothing to do is a legitimate answer, and offering a button would undercut it.
+  no_action_needed: null,
+};
+
 export function NextActionPanel({ quotationId }: { quotationId: string | null }) {
   const [showWhy, setShowWhy] = useState(false);
   const { state, reload } = useAiResource<{ action: NextBestAction }>(
@@ -189,6 +223,10 @@ export function NextActionPanel({ quotationId }: { quotationId: string | null })
   if (state.status === "failed") return <Failure message={state.message} onRetry={reload} />;
 
   const { action } = state.data;
+  // Falls back to null rather than throwing if the model ever returns a kind the
+  // schema should have rejected: a missing button is a smaller failure than a
+  // blank panel.
+  const destination = ACTION_DESTINATION[action.kind] ?? null;
 
   return (
     <div className="space-y-3">
@@ -204,6 +242,18 @@ export function NextActionPanel({ quotationId }: { quotationId: string | null })
           </span>
         </div>
         <p className="text-[11px] text-indigo-900/80 mt-1.5 leading-relaxed">{action.reason}</p>
+
+        {destination && (
+          <a
+            className="mt-2.5 inline-flex items-center gap-1 text-[11px] font-bold text-white bg-indigo-600 hover:bg-indigo-700 px-2.5 py-1 rounded-lg shadow-xs transition-colors"
+            href={destination.href(quotationId)}
+          >
+            {destination.label}
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" />
+            </svg>
+          </a>
+        )}
       </div>
 
       <div>

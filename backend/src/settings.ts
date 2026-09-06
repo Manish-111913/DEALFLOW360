@@ -30,6 +30,25 @@ export const SETTING_KEYS = {
   invoiceNumberPrefix: "invoice.numberPrefix",
   creditNoteNumberPrefix: "creditNote.numberPrefix",
   billingPeriodsAhead: "billing.periodsAhead",
+
+  // Fulfilment. These are what the Settings screen's "Fulfillment Preferences"
+  // actually change - each one is read by the allocator or the replenishment
+  // report, so switching it changes what the application does rather than
+  // storing a preference nobody consults.
+  fulfilmentRanking: "fulfilment.ranking",
+  fulfilmentBackorders: "fulfilment.backordersEnabled",
+  fulfilmentReorderLevel: "fulfilment.defaultReorderLevel",
+  fulfilmentReorderQuantity: "fulfilment.defaultReorderQuantity",
+
+  // Upsell. The engine already weights history, margin and promotion; these
+  // turn two of those inputs off and raise the margin floor company-wide.
+  upsellUseHistory: "upsell.useHistory",
+  upsellUsePromoted: "upsell.usePromoted",
+  upsellMinMargin: "upsell.minMarginPercentage",
+
+  // Reporting defaults, applied by runSalesReport when a filter is omitted.
+  reportingDefaultPeriodDays: "reporting.defaultPeriodDays",
+  reportingDefaultStates: "reporting.defaultApprovalStates",
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -55,6 +74,25 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   // How many future periods a new subscription materialises. Long enough to
   // show a year of a monthly plan; a yearly plan needs far fewer rows.
   [SETTING_KEYS.billingPeriodsAhead]: "12",
+
+  // D9's rule as written: "minimise the number of shipments", with freight as
+  // the tie-break. A company that pays more for a split than it saves in
+  // handling sets COST_FIRST instead.
+  [SETTING_KEYS.fulfilmentRanking]: "SHIPMENTS_FIRST",
+  [SETTING_KEYS.fulfilmentBackorders]: "true",
+  // Zero means "no company-wide reorder point"; a stock row's own level still
+  // applies. Setting it makes every row without one start reporting.
+  [SETTING_KEYS.fulfilmentReorderLevel]: "0",
+  [SETTING_KEYS.fulfilmentReorderQuantity]: "0",
+
+  [SETTING_KEYS.upsellUseHistory]: "true",
+  [SETTING_KEYS.upsellUsePromoted]: "true",
+  // A floor on top of each pairing's own. Zero leaves pairings in charge.
+  [SETTING_KEYS.upsellMinMargin]: "0",
+
+  [SETTING_KEYS.reportingDefaultPeriodDays]: "90",
+  // Empty means every state. A comma-separated list narrows it.
+  [SETTING_KEYS.reportingDefaultStates]: "",
 };
 
 export const SETTING_DESCRIPTIONS: Record<SettingKey, string> = {
@@ -74,6 +112,24 @@ export const SETTING_DESCRIPTIONS: Record<SettingKey, string> = {
   [SETTING_KEYS.creditNoteNumberPrefix]: "Prefix for generated credit note numbers.",
   [SETTING_KEYS.billingPeriodsAhead]:
     "Future billing periods written when a subscription starts.",
+  [SETTING_KEYS.fulfilmentRanking]:
+    "How competing allocation plans are ranked once both fill the order.",
+  [SETTING_KEYS.fulfilmentBackorders]:
+    "Whether unfillable quantities are recorded as backorders rather than refused.",
+  [SETTING_KEYS.fulfilmentReorderLevel]:
+    "Company-wide reorder point for stock rows that set none of their own.",
+  [SETTING_KEYS.fulfilmentReorderQuantity]:
+    "Company-wide replenishment target for stock rows that set none of their own.",
+  [SETTING_KEYS.upsellUseHistory]:
+    "Whether co-purchase history feeds the upsell score, or only configured rates.",
+  [SETTING_KEYS.upsellUsePromoted]:
+    "Whether a promoted product earns its ranking bonus.",
+  [SETTING_KEYS.upsellMinMargin]:
+    "Company-wide margin floor a suggestion must clear, on top of the pairing's own.",
+  [SETTING_KEYS.reportingDefaultPeriodDays]:
+    "How far back a sales report looks when no period is given.",
+  [SETTING_KEYS.reportingDefaultStates]:
+    "Approval states a sales report includes by default. Empty means all.",
 };
 
 export interface ResolvedSettings {
@@ -87,7 +143,20 @@ export interface ResolvedSettings {
   invoiceNumberPrefix: string;
   creditNoteNumberPrefix: string;
   billingPeriodsAhead: number;
+  fulfilmentRanking: FulfilmentRanking;
+  fulfilmentBackorders: boolean;
+  fulfilmentReorderLevel: number;
+  fulfilmentReorderQuantity: number;
+  upsellUseHistory: boolean;
+  upsellUsePromoted: boolean;
+  upsellMinMargin: Prisma.Decimal;
+  reportingDefaultPeriodDays: number;
+  reportingDefaultStates: string[];
 }
+
+/** How the allocator breaks a tie between plans that both fill the order. */
+export type FulfilmentRanking = "SHIPMENTS_FIRST" | "COST_FIRST";
+export const FULFILMENT_RANKINGS: FulfilmentRanking[] = ["SHIPMENTS_FIRST", "COST_FIRST"];
 
 /**
  * In-process cache, loaded on first use and updated on write.
@@ -97,14 +166,45 @@ export interface ResolvedSettings {
  * deliberately not built, because it is not needed yet.
  */
 let cache: Map<string, string> | null = null;
+let loadedAtMs = 0;
+
+/**
+ * How long a loaded snapshot is trusted before it is re-read.
+ *
+ * The cache used to be loaded once and only ever updated by this process's own
+ * writes, which was correct while there was one server. There are now two - the
+ * internal workspace and the customer portal are separate Next processes over
+ * one database - and a third writer would be a script. A setting changed on one
+ * would have gone unnoticed by the others until they restarted, so the Settings
+ * screen would appear to work and quietly not apply.
+ *
+ * A short window rather than a notify channel: SystemSetting is ten rows, the
+ * re-read is trivial, and a few seconds of staleness on a configuration change
+ * is not something anyone can perceive. `setSetting` still updates its own
+ * process instantly, so the person making the change sees it immediately.
+ */
+const CACHE_TTL_MS = 5_000;
+
+/**
+ * Monotonic elapsed time, not a clock reading.
+ *
+ * D3 puts business time on the server so the demo can time-travel, and a cache
+ * that expired against business time would never expire while the clock was
+ * held still - or expire instantly when it jumped. `performance.now()` measures
+ * elapsed real time and cannot be travelled, which is exactly what a TTL needs.
+ */
+function elapsedMs(): number {
+  return performance.now();
+}
 
 export async function refreshSettings(): Promise<void> {
   const rows = await prisma.systemSetting.findMany();
   cache = new Map(rows.map((r) => [r.key, r.value]));
+  loadedAtMs = elapsedMs();
 }
 
 async function ensureCache(): Promise<Map<string, string>> {
-  if (!cache) await refreshSettings();
+  if (!cache || elapsedMs() - loadedAtMs > CACHE_TTL_MS) await refreshSettings();
   return cache as Map<string, string>;
 }
 
@@ -125,6 +225,18 @@ export async function getSettings(): Promise<ResolvedSettings> {
     invoiceNumberPrefix: raw(map, SETTING_KEYS.invoiceNumberPrefix),
     creditNoteNumberPrefix: raw(map, SETTING_KEYS.creditNoteNumberPrefix),
     billingPeriodsAhead: Number(raw(map, SETTING_KEYS.billingPeriodsAhead)),
+    fulfilmentRanking: raw(map, SETTING_KEYS.fulfilmentRanking) as FulfilmentRanking,
+    fulfilmentBackorders: raw(map, SETTING_KEYS.fulfilmentBackorders) === "true",
+    fulfilmentReorderLevel: Number(raw(map, SETTING_KEYS.fulfilmentReorderLevel)),
+    fulfilmentReorderQuantity: Number(raw(map, SETTING_KEYS.fulfilmentReorderQuantity)),
+    upsellUseHistory: raw(map, SETTING_KEYS.upsellUseHistory) === "true",
+    upsellUsePromoted: raw(map, SETTING_KEYS.upsellUsePromoted) === "true",
+    upsellMinMargin: new Decimal(raw(map, SETTING_KEYS.upsellMinMargin)),
+    reportingDefaultStates: raw(map, SETTING_KEYS.reportingDefaultStates)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    reportingDefaultPeriodDays: Number(raw(map, SETTING_KEYS.reportingDefaultPeriodDays)),
   };
 }
 
@@ -175,6 +287,46 @@ function validate(key: SettingKey, value: string): void {
         throw new ValidationError("Prefix must be 1 to 8 letters, digits or hyphens.", key);
       }
       return;
+    case SETTING_KEYS.fulfilmentRanking:
+      if (!(FULFILMENT_RANKINGS as string[]).includes(value)) {
+        throw new ValidationError(
+          `Ranking must be one of ${FULFILMENT_RANKINGS.join(", ")}.`,
+          key,
+        );
+      }
+      return;
+    case SETTING_KEYS.fulfilmentBackorders:
+    case SETTING_KEYS.upsellUseHistory:
+    case SETTING_KEYS.upsellUsePromoted:
+      if (value !== "true" && value !== "false") {
+        throw new ValidationError("Value must be true or false.", key);
+      }
+      return;
+    case SETTING_KEYS.fulfilmentReorderLevel:
+    case SETTING_KEYS.fulfilmentReorderQuantity: {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 0 || n > 1_000_000) {
+        throw new ValidationError("Value must be a whole number of units.", key);
+      }
+      return;
+    }
+    case SETTING_KEYS.reportingDefaultPeriodDays: {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 3650) {
+        throw new ValidationError("Period must be between 1 and 3650 days.", key);
+      }
+      return;
+    }
+    case SETTING_KEYS.reportingDefaultStates: {
+      const allowed = ["NONE", "PENDING_MANAGER", "PENDING_FINANCE", "APPROVED", "REJECTED"];
+      const states = value.split(",").map((v) => v.trim()).filter(Boolean);
+      const unknown = states.filter((v) => !allowed.includes(v));
+      if (unknown.length > 0) {
+        throw new ValidationError(`Unknown approval state: ${unknown.join(", ")}.`, key);
+      }
+      return;
+    }
+    case SETTING_KEYS.upsellMinMargin:
     case SETTING_KEYS.targetMarginPercentage:
     case SETTING_KEYS.discountFallbackCeiling: {
       const n = new Decimal(value);
@@ -254,4 +406,5 @@ export async function ensureDefaultSettings(actorId?: string | null): Promise<nu
 /** Test helper: drop the cache so the next read hits the database. */
 export function __clearSettingsCacheForTests(): void {
   cache = null;
+  loadedAtMs = 0;
 }

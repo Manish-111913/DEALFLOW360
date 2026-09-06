@@ -4,13 +4,13 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import {
-  AgentButton,
   AppShell,
   AppWindow,
   StatusBar,
   WindowScroll,
 } from "@/components/app-shell";
 import { AppDock } from "@/components/app-dock";
+import { DealAssistant } from "@/components/deal-assistant";
 import { CHROME_BAR, PAGE_SUBTITLE, PAGE_TITLE, SCROLL_PADDING } from "@/components/design-tokens";
 import { ROUTES } from "@/lib/navigation";
 import { formatRupees } from "@/lib/money";
@@ -94,7 +94,13 @@ export function NegotiationClient({
   internalNotice,
 }: {
   data: PortalData | null;
-  internalNotice: { role: string; sharedQuoteNumber: string | null; sharedCustomer: string | null } | null;
+  internalNotice: {
+    role: string;
+    /** The deal the assistant opens against, when the caller can see one. */
+    sharedQuotationId: string | null;
+    sharedQuoteNumber: string | null;
+    sharedCustomer: string | null;
+  } | null;
 }) {
   const router = useRouter();
   const [target, setTarget] = useState<PortalLine | "overall" | null>(null);
@@ -367,7 +373,18 @@ export function NegotiationClient({
       </AppWindow>
 
       <AppDock />
-      <AgentButton />
+      {/* Every other screen carries the assistant; this one drew the inert
+          launcher instead, so the screen about the customer conversation was
+          the single place you could not ask a question about it. */}
+      <DealAssistant
+        quotationId={internalNotice?.sharedQuotationId ?? null}
+        screen="negotiation"
+        subject={
+          internalNotice?.sharedQuoteNumber && internalNotice.sharedCustomer
+            ? `${internalNotice.sharedQuoteNumber} - ${internalNotice.sharedCustomer}`
+            : null
+        }
+      />
 
       {target && data && (
         <NegotiationModal

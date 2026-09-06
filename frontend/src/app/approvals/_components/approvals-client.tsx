@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { AppShell, AppWindow, StatusBar } from "@/components/app-shell";
 import { AppDock } from "@/components/app-dock";
+import { useDealEvents } from "@/lib/use-deal-events";
 import { DealAssistant } from "@/components/deal-assistant";
 import { CHROME_BAR, PAGE_SUBTITLE, PAGE_TITLE, SCROLL_PADDING } from "@/components/design-tokens";
 import { WindowScroll } from "@/components/app-shell";
@@ -91,6 +92,14 @@ export function ApprovalsClient({
   queue: QueueEntry[];
 }) {
   const router = useRouter();
+
+  // A customer countering on the portal puts a quotation into this queue. The
+  // event says only that something moved; the page re-reads to find out what,
+  // through the same authorised route it always uses.
+  const { connected: liveQueue } = useDealEvents({
+    surface: "internal",
+    onEvent: () => router.refresh(),
+  });
   const [collecting, setCollecting] = useState<"REJECT" | "RETURN" | null>(null);
   const [reason, setReason] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
@@ -176,6 +185,24 @@ export function ApprovalsClient({
                   </div>
                   <div className="flex flex-wrap items-center gap-3">
                     <h1 className={PAGE_TITLE}>Discount Approval</h1>
+                    {/* A customer countering on the portal lands here without a
+                        refresh, so the queue says whether it is actually live. */}
+                    <span
+                      className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-400"
+                      title={
+                        liveQueue
+                          ? "Connected to the deal event stream"
+                          : "Not connected - the queue updates when you reload"
+                      }
+                    >
+                      <span
+                        className={
+                          "w-1.5 h-1.5 rounded-full " +
+                          (liveQueue ? "bg-emerald-500" : "bg-slate-300")
+                        }
+                      />
+                      {liveQueue ? "Live" : "Offline"}
+                    </span>
                     <span
                       className={
                         "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold border shadow-xs " +
@@ -716,16 +743,40 @@ function ApprovalChain({ data }: { data: ApprovalScreenData }) {
                   {request.decisionReason}
                 </p>
               )}
+              {/* Formatted by hand, not with toLocaleString.
+                  This markup is rendered on the server and again in the browser,
+                  and the two do not agree: the server produced "9/6/2026,
+                  5:07:51 AM" and the browser "6/9/2026, 5:07:51 am" - a
+                  different date order and a different case, from a different
+                  locale and timezone. React calls that a hydration mismatch and
+                  throws. `display-clock.ts` documents the same trap and the same
+                  answer: zero-padded fixed digits read identically everywhere. */}
               <p className="text-[11px] text-slate-400 mt-1 font-jetbrains">
                 {request.actedAt
-                  ? `Decided ${new Date(request.actedAt).toLocaleString()}`
-                  : `Submitted ${new Date(request.requestedAt).toLocaleString()}`}
+                  ? `Decided ${stamp(request.actedAt)}`
+                  : `Submitted ${stamp(request.requestedAt)}`}
               </p>
             </div>
           </div>
         ))}
       </div>
     </section>
+  );
+}
+
+/**
+ * "2026-09-06 05:07" - the same characters on the server and in the browser.
+ *
+ * Built from the UTC parts rather than a locale formatter, for the reason above:
+ * anything locale- or timezone-dependent renders differently in the two places
+ * this markup is produced and breaks hydration.
+ */
+function stamp(iso: string): string {
+  const at = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${at.getUTCFullYear()}-${pad(at.getUTCMonth() + 1)}-${pad(at.getUTCDate())} ` +
+    `${pad(at.getUTCHours())}:${pad(at.getUTCMinutes())} UTC`
   );
 }
 

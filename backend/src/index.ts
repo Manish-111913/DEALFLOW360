@@ -199,6 +199,7 @@ export {
 
 export {
   ensureDefaultSettings,
+  FULFILMENT_RANKINGS,
   getSetting,
   getSettings,
   refreshSettings,
@@ -206,6 +207,7 @@ export {
   SETTING_DEFAULTS,
   SETTING_DESCRIPTIONS,
   SETTING_KEYS,
+  type FulfilmentRanking,
   type ResolvedSettings,
   type SettingKey,
 } from "./settings";
@@ -248,7 +250,10 @@ export {
 
 export {
   decideApproval,
+  assertQuotationDecidable,
   getApprovalOverview,
+  listAwaitingDecision,
+  listDecisionQueue,
   loadActiveApprovalSteps,
   stepTypeFor,
   submitForApproval,
@@ -290,6 +295,7 @@ export {
   hasFulfillmentPlan,
   overrideAllocation,
   planFulfillment,
+  planFulfillmentAs,
   receiveStock,
   type AllocateResult,
   type ConsolidationCandidate,
@@ -338,15 +344,128 @@ export {
 } from "./services/quotation-versions";
 
 export {
+  listQuotableCustomers,
+  type QuotableCustomer,
+} from "./services/customers";
+
+export {
+  addApprovalStep,
+  removeApprovalStep,
+  removeCategoryCeiling,
+  resetSetting,
+  setApprovalStep,
+  setCategoryCeiling,
+  setPriceListActive,
+  setProduct,
+  setSubscriptionPlan,
+  setTierCeiling,
+  setUpsellRule,
+  setWarehouse,
+  updateSetting,
+} from "./services/settings-admin";
+
+export {
+  listPolicyTestInputs,
+  testDealPolicy,
+  type PolicyTestResult,
+} from "./services/policy-test";
+
+export {
+  acceptUpsellAs,
+  consolidateBackorderAs,
+  dismissUpsellAs,
+  getHealthHistoryAs,
+  listConsolidatableBackordersAs,
+  listQuotationVersionsAs,
+  receiveStockAs,
+  recomputeDealHealthAs,
+  refreshUpsellRatesAs,
+  setCustomerTierAs,
+  type ConsolidationResult,
+  type HealthHistoryPoint,
+  type QuotationVersionRow,
+  type StockReceipt,
+  type StockReceiptResult,
+  type TierChange,
+} from "./services/operations-admin";
+
+// ---------------------------------------------------------------------------
+// The customer's own AI surface.
+//
+// Deliberately a separate family from the internal one rather than a widened
+// version of it: its own context builder over portal-visible fields only, its
+// own prompt, and a hard refusal of any non-portal identity at both ends. The
+// internal builder refuses a PORTAL user and this one refuses everyone else, so
+// neither can drift into serving the other (D20).
+// ---------------------------------------------------------------------------
+
+export {
+  buildPortalContext,
+  renderPortalContext,
+  type PortalDealContext,
+} from "./ai/portal-context";
+
+export {
+  draftNegotiationMessage,
+  explainQuotation,
+  type NegotiationDraft,
+  type QuotationExplanation,
+} from "./ai/portal-intelligence";
+
+export {
+  createCustomerAs,
+  createPortalUserAs,
+  issuePortalLinkAs,
+  listAccounts,
+  listAssignableOwners,
+  type AccountRow,
+  type IssuedLink,
+  type NewAccount,
+} from "./services/account-admin";
+
+export {
+  dispatchShipmentAs,
+  listDispatchable,
+  recordDeliveryAs,
+  type DispatchableGroup,
+} from "./services/dispatch";
+
+export {
+  issueBillingAs,
+  listInvoicesFor,
+  recordPaymentAs,
+  runBillingAs,
+  type InvoiceLedgerRow,
+  type IssuedBilling,
+} from "./services/payments";
+
+export {
+  addLineAs,
+  createQuotationAs,
+  removeLineAs,
+  shareWithCustomerAs,
+  submitForApprovalAs,
+  updateLineAs,
+  type LineEdit,
+  type NewLine,
+  type NewQuotation,
+} from "./services/quotation-authoring";
+
+export {
   assertNoInternalFields,
   confirmPortalQuotation,
   getNegotiationHistory,
+  listMyQuotations,
   shareWithCustomer,
   submitNegotiation,
+  versionOf,
   viewPortalQuotation,
   type ConfirmResult,
   type NegotiateResult,
+  type NegotiationOutcome,
   type PortalQuotation,
+  type PortalQuotationLine,
+  type PortalQuotationSummary,
   type PortalStatus,
   type PortalViewResult,
 } from "./services/portal";
@@ -370,6 +489,7 @@ export {
   recomputeAllDealHealth,
   repRollingAverageDiscount,
   resolveAlert,
+  resolveAlertAs,
   scoreDealHealth,
   type DashboardRow,
   type DealHealthSnapshotResult,

@@ -11,6 +11,12 @@
 export const ROUTES = {
   /** The public marketing page. The only route a signed-out visitor lands on. */
   landing: "/",
+  /**
+   * Where a customer lands. Distinct from `negotiation`, which is the internal
+   * side's view *of* the portal - a staff member opening that screen is shown a
+   * notice explaining whose view it is, and a customer must never be sent there.
+   */
+  customerHome: "/my/quotations",
   /** Where signing in takes you. `landing` owns "/" now, so this is explicit. */
   home: "/dashboard",
   sales: "/sales",
@@ -19,6 +25,8 @@ export const ROUTES = {
   billing: "/billing",
   negotiation: "/negotiation",
   dealHealth: "/deal-health",
+  accounts: "/accounts",
+  settings: "/settings",
 } as const;
 
 export type RouteKey = keyof typeof ROUTES;
@@ -27,6 +35,7 @@ export type Route = (typeof ROUTES)[RouteKey];
 /** Which dock item is highlighted, keyed the same way as ROUTES. */
 export const SCREEN_TITLES: Record<RouteKey, string> = {
   landing: "DealFlow360",
+  customerHome: "My Quotations",
   home: "Command Center",
   sales: "Sales Workspace",
   approvals: "Discount Approval",
@@ -34,4 +43,6 @@ export const SCREEN_TITLES: Record<RouteKey, string> = {
   billing: "Subscription & Billing",
   negotiation: "Customer Negotiation Portal",
   dealHealth: "Deal Health & Anomaly Dashboard",
+  accounts: "Customer Accounts & Portal Access",
+  settings: "Settings",
 };

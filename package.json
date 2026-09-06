@@ -17,7 +17,10 @@
     "db:migrate": "npm run db:migrate -w @dealflow/backend",
     "db:reset": "npm run db:reset -w @dealflow/backend",
     "db:seed": "npm run db:seed -w @dealflow/backend",
-    "db:studio": "npm run db:studio -w @dealflow/backend"
+    "db:studio": "npm run db:studio -w @dealflow/backend",
+    "dev:internal": "npm run dev:internal -w @dealflow/frontend",
+    "dev:portal": "npm run dev:portal -w @dealflow/frontend",
+    "dev:both": "npm run dev:both -w @dealflow/frontend"
   },
   "devDependencies": {
     "eslint": "^9",

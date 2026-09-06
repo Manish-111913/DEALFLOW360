@@ -1,7 +1,10 @@
 import {
   assertQuotationVisible,
+  can,
+  currentBusinessTime,
   getFulfillmentView,
   getQuotation,
+  listDispatchable,
   listQuotations,
   listWarehouses,
 } from "@dealflow/backend";
@@ -11,10 +14,10 @@ import { FulfillmentClient } from "./_components/fulfillment-client";
 /**
  * Screen 4 - Fulfillment & Warehouse Allocation.
  *
- * Fulfilment only means something once a plan exists, so the page picks the
- * most recent approved order that actually has one rather than simply the most
- * recent approved order - which is usually a quote nobody has planned yet, and
- * would render a screen of nulls.
+ * The page prefers the most recent approved order that already has a plan, and
+ * falls back to the most recent that has none. Preferring a planned order keeps
+ * the screen useful; falling back is what makes it reachable, because an order
+ * with no plan is the one somebody came here to plan.
  *
  * `?id=` overrides, guarded by `assertQuotationVisible` because
  * `getFulfillmentView` takes an id and checks nothing itself.
@@ -42,13 +45,31 @@ export default async function FulfillmentPage({
     await assertQuotationVisible(user, chosenId);
     view = await getFulfillmentView(user, chosenId);
   } else {
+    // An order that already has a plan is the screen worth opening on, so it
+    // still wins. What changed is what happens when none of them does: the
+    // newest planless order is shown instead of nothing at all. Skipping it
+    // meant the dock landed on "no fulfilment" while an approved order sat
+    // waiting to be planned, reachable only by typing its id into the URL.
+    let fallbackId: string | null = null;
+    let fallbackView: Awaited<ReturnType<typeof getFulfillmentView>> | null = null;
+
     for (const candidate of candidates.slice(0, 25)) {
       const found = await getFulfillmentView(user, candidate.id);
-      if (found && (found.recommended || found.allocations.length > 0)) {
+      if (!found) continue;
+      if (found.recommended || found.allocations.length > 0) {
         chosenId = candidate.id;
         view = found;
         break;
       }
+      if (!fallbackView) {
+        fallbackId = candidate.id;
+        fallbackView = found;
+      }
+    }
+
+    if (!view) {
+      chosenId = fallbackId;
+      view = fallbackView;
     }
   }
 
@@ -60,6 +81,11 @@ export default async function FulfillmentPage({
   // The override dialog writes picks keyed by warehouse id, and the plan view
   // only names warehouses - so the ids and the free stock come from here.
   const warehouses = await listWarehouses();
+
+  // What can actually leave the building. Computed on the server from the
+  // reservations rather than from the plan, because a manual override may have
+  // moved units to a depot the plan never proposed.
+  const dispatchable = await listDispatchable(user, chosenId);
 
   const plan = (source: NonNullable<typeof view>["recommended"]) =>
     source
@@ -116,7 +142,13 @@ export default async function FulfillmentPage({
           shippingCost: String(shipment.shippingCost),
           estimatedDeliveryDate: shipment.estimatedDeliveryDate?.toISOString() ?? null,
           slipped: shipment.slipped,
+          delivered: shipment.actualDeliveryDate !== null,
         })),
+        dispatchable,
+        canAllocate: can(user, "allocate"),
+        // D3: business time is the server's, so the date fields agree with the
+        // timestamps the services write even in a time-travelled demo.
+        businessToday: currentBusinessTime().toISOString().slice(0, 10),
         orderLines: (quotation?.lines ?? []).map((line) => ({
           id: line.id,
           productId: line.productId,

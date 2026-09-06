@@ -8,6 +8,7 @@ import { prisma } from "../db";
 import { isPendingApproval } from "../domain/approval";
 import { NotFoundError } from "../errors";
 import { findSlippedShipments } from "./fulfillment";
+import { assertQuotationVisible } from "./quotations";
 import {
   computeDealHealth,
   RECOMMENDED_ACTIONS,
@@ -121,8 +122,20 @@ export interface DealHealthSnapshotResult extends DealHealthResult {
  *
  * Snapshots are kept as history rather than overwritten, so a manager can see a
  * deal getting worse rather than only that it is bad now.
+ *
+ * `persist: false` scores without writing anything - no snapshot, no alerts.
+ * That exists because a *reader* was calling this: the AI context builder scored
+ * every deal it explained, so opening the assistant appended a snapshot to the
+ * history and could raise an alert, purely as a side effect of asking a
+ * question. History that records "somebody looked at this" is not history, and
+ * an alert nobody's action caused is noise. A read must not write.
  */
-export async function scoreDealHealth(quotationId: string): Promise<DealHealthSnapshotResult> {
+export async function scoreDealHealth(
+  quotationId: string,
+  options?: { persist?: boolean },
+): Promise<DealHealthSnapshotResult> {
+  const persist = options?.persist !== false;
+
   const quotation = await prisma.quotation.findUnique({
     where: { id: quotationId },
     include: { lines: { select: { discountPercentage: true } } },
@@ -155,30 +168,36 @@ export async function scoreDealHealth(quotationId: string): Promise<DealHealthSn
     repRollingAverageDiscount: baseline.average,
   });
 
-  const snapshot = await prisma.dealHealthSnapshot.create({
-    data: {
-      quotationId,
-      riskScore: quotation.riskScore,
-      healthScore: result.healthScore,
-      severity: result.severity,
-      stalledPenalty: result.penalties.stalled,
-      approvalDelayPenalty: result.penalties.approvalDelay,
-      negotiationPenalty: result.penalties.negotiation,
-      deliveryPenalty: result.penalties.delivery,
-      discountAnomalyPenalty: result.penalties.discountAnomaly,
-      stalledDays: wholeDaysBetween(quotation.lastActivityAt, now),
-      negotiationCount: quotation.negotiationCount,
-      recommendedAction: result.recommendedAction,
-      computedAt: now,
-    },
-  });
+  const snapshot = persist
+    ? await prisma.dealHealthSnapshot.create({
+        data: {
+          quotationId,
+          riskScore: quotation.riskScore,
+          healthScore: result.healthScore,
+          severity: result.severity,
+          stalledPenalty: result.penalties.stalled,
+          approvalDelayPenalty: result.penalties.approvalDelay,
+          negotiationPenalty: result.penalties.negotiation,
+          deliveryPenalty: result.penalties.delivery,
+          discountAnomalyPenalty: result.penalties.discountAnomaly,
+          stalledDays: wholeDaysBetween(quotation.lastActivityAt, now),
+          negotiationCount: quotation.negotiationCount,
+          recommendedAction: result.recommendedAction,
+          computedAt: now,
+        },
+      })
+    : null;
 
-  await raiseAlertsFor({ quotationId, result, now });
-  await raiseSlippageAlert({ quotationId, now, severity: result.severity });
+  if (persist) {
+    await raiseAlertsFor({ quotationId, result, now });
+    await raiseSlippageAlert({ quotationId, now, severity: result.severity });
+  }
 
   return {
     ...result,
-    snapshotId: snapshot.id,
+    // Empty rather than a fabricated id: nothing was stored, and a caller that
+    // tries to look this up should fail loudly rather than find the wrong row.
+    snapshotId: snapshot?.id ?? "",
     quotationId,
     quoteNumber: quotation.quoteNumber,
     discountBaseline: {
@@ -387,6 +406,34 @@ export async function resolveAlert(params: {
     where: { id: params.alertId, status: { not: "RESOLVED" } },
     data: { status: "RESOLVED", resolvedAt: now },
   });
+}
+
+/**
+ * Resolve an alert, with the caller checked against the deal it belongs to.
+ *
+ * `resolveAlert` asks `assertCan(user, "escalate")` and then updates by id
+ * alone, which answers "may this kind of user close alerts at all" - it says
+ * nothing about which deal the alert is on. A manager holds `escalate` and is
+ * scoped to their own team, so on its own that primitive lets a manager close
+ * an alert raised on the other team's deal. Asking the second question here
+ * makes the board's Resolve button match the rows the board is allowed to show.
+ *
+ * Returns the deal the alert belonged to, because the caller has to reload that
+ * board and would otherwise have to look it up again.
+ */
+export async function resolveAlertAs(user: AuthzUser, alertId: string): Promise<string> {
+  const alert = await prisma.dealAlert.findUnique({
+    where: { id: alertId },
+    select: { quotationId: true },
+  });
+  // NotFound rather than Forbidden, for the usual reason: confirming the alert
+  // exists is itself a disclosure.
+  if (!alert) throw new NotFoundError(`Alert ${alertId} does not exist`);
+
+  await assertQuotationVisible(user, alert.quotationId);
+  await resolveAlert({ alertId, user });
+
+  return alert.quotationId;
 }
 
 // ---------------------------------------------------------------------------

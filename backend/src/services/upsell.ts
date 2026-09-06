@@ -177,7 +177,16 @@ export async function getUpsellSuggestions(
     });
   }
 
-  const suggestions = rankUpsells(candidates);
+  // The three controls on the Settings screen are read here, so turning one
+  // off genuinely changes which suggestions surface and in what order.
+  const settings = await getSettings();
+  const suggestions = rankUpsells(candidates, {
+    policy: {
+      useHistory: settings.upsellUseHistory,
+      usePromoted: settings.upsellUsePromoted,
+      minMarginPercentage: settings.upsellMinMargin,
+    },
+  });
 
   if (options?.persist !== false) {
     const now = currentBusinessTime();

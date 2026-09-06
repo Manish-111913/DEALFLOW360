@@ -5,9 +5,20 @@ import {
   getUpsellSuggestions,
   listQuotations,
 } from "@dealflow/backend";
+import { can } from "@dealflow/backend";
 import { requireInternalUser } from "@/auth";
 import { SalesClient } from "./_components/sales-client";
 import type { BuilderData } from "./_components/types";
+
+/** Keep the best-scoring suggestion per product, in the order given. */
+function dedupeByProduct<T extends { productId: string }>(suggestions: T[]): T[] {
+  const seen = new Set<string>();
+  return suggestions.filter((suggestion) => {
+    if (seen.has(suggestion.productId)) return false;
+    seen.add(suggestion.productId);
+    return true;
+  });
+}
 
 /**
  * Screen 2 - the Sales Workspace.
@@ -69,7 +80,15 @@ export default async function SalesWorkspacePage({
         })),
         // The engine scores and explains each suggestion; the panel prints its
         // reasoning rather than inventing an attachment rate.
-        upsell: upsell.map((suggestion) => ({
+        //
+        // One product per card. A product can be paired with more than one thing
+        // already on the quotation - Setup Service pairs with both the laptop and
+        // the server - and the engine ranks pairings, not products, so it can
+        // legitimately return the same product twice. Offering a rep the same
+        // add-on twice is noise, and it also collided on the React key. The list
+        // arrives sorted by score, so the first occurrence is the best one and
+        // the rest are dropped.
+        upsell: dedupeByProduct(upsell).map((suggestion) => ({
           productId: suggestion.productId,
           productName: suggestion.productName,
           reason: suggestion.reason,
@@ -86,6 +105,10 @@ export default async function SalesWorkspacePage({
   return (
     <SalesClient
       builder={builder}
+      // Finance and Operations do not author deals, so they are not offered a
+      // New Quotation button that the create endpoint would refuse. Same
+      // predicate the service asserts with, so the two cannot disagree.
+      canCreate={can(user, "create", "quotation")}
       pipeline={{
         stages: pipeline.stages.map((stage) => ({
           stage: stage.stage,

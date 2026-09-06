@@ -5,6 +5,7 @@ import { currentBusinessTime } from "../clock";
 import { prisma } from "../db";
 import { ConflictError, NotFoundError, ValidationError } from "../errors";
 import { ADVISORY_LOCK } from "../locks";
+import { getSettings } from "../settings";
 import {
   planAllocation,
   stockKey,
@@ -115,7 +116,10 @@ export interface PlanResult extends AllocationResult {
  */
 export async function planFulfillment(quotationId: string): Promise<PlanResult> {
   const { demand, warehouses, snapshotAt } = await readDemandAndSupply(quotationId);
-  const result = planAllocation({ demand, warehouses });
+  // The tie-break between two plans that fill the same demand is configured,
+  // so changing it on the Settings screen changes which plan is recommended.
+  const { fulfilmentRanking } = await getSettings();
+  const result = planAllocation({ demand, warehouses, ranking: fulfilmentRanking });
 
   const planId = await prisma.$transaction(async (tx) => {
     // Superseded rather than deleted, so a rep can see the plan they were shown
@@ -172,6 +176,43 @@ export async function planFulfillment(quotationId: string): Promise<PlanResult> 
   }
 
   return { ...result, planId, runnerUpPlanId };
+}
+
+/**
+ * Produce the first plan for an order that has none.
+ *
+ * `planFulfillment` above is refresh-shaped and takes no user, because
+ * `recalculate` calls it on every edit - but only when a plan already exists,
+ * since planning a quote nobody has costed yet would be work on every
+ * keystroke for nothing. That guard was correct and left a hole nothing else
+ * filled: no path in the application created the *first* plan. The seed wrote
+ * plans directly into the database, so the fulfilment screen looked complete
+ * while an order raised through the product could never acquire one, and the
+ * screen that exists to show plans had nothing to show for the rest of its life.
+ *
+ * This is the missing path, and it is deliberately an explicit act rather than
+ * something a page does on load: planning writes rows, and a GET that writes is
+ * how a screen ends up producing history simply by being looked at.
+ */
+export async function planFulfillmentAs(
+  user: AuthzUser,
+  quotationId: string,
+): Promise<PlanResult> {
+  // D17 - the same capability that owns allocation owns proposing it.
+  assertCan(user, "allocate");
+
+  const quotation = await prisma.quotation.findUnique({
+    where: { id: quotationId },
+    select: { quoteNumber: true, approvalState: true },
+  });
+  if (!quotation) throw new NotFoundError(`Quotation ${quotationId} does not exist`);
+  if (quotation.approvalState !== "APPROVED") {
+    throw new ConflictError(
+      `Quotation ${quotation.quoteNumber} is not approved, so it cannot be planned.`,
+    );
+  }
+
+  return planFulfillment(quotationId);
 }
 
 /** True when this quotation already has a plan worth keeping current. */
@@ -236,6 +277,9 @@ export async function allocateFulfillment(params: {
   });
 
   const now = currentBusinessTime();
+  // Read before the transaction opens: settings are configuration, not part of
+  // the stock consistency this lock exists to protect.
+  const settings = await getSettings();
 
   return prisma.$transaction(async (tx) => {
     // Lock every stock row that could be touched, ordered by id so concurrent
@@ -261,7 +305,7 @@ export async function allocateFulfillment(params: {
 
     const plan: AllocationPlan = params.override
       ? buildOverridePlan(params.override, demand, warehouses)
-      : planAllocation({ demand, warehouses }).recommended;
+      : planAllocation({ demand, warehouses, ranking: settings.fulfilmentRanking }).recommended;
 
     for (const pick of plan.picks) {
       const line = demand.find((d) => d.lineId === pick.lineId);
@@ -304,6 +348,18 @@ export async function allocateFulfillment(params: {
           updatedAt: now,
         },
       });
+    }
+
+    // Backorder handling is a policy, not an assumption. With it off, an order
+    // the network cannot fill is refused outright rather than part-shipped with
+    // a promise attached - which is what a company that never backorders wants,
+    // and is why this refuses rather than silently dropping the shortfall.
+    if (plan.shortfalls.length > 0 && !settings.fulfilmentBackorders) {
+      const short = plan.shortfalls.reduce((sum, s) => sum + s.quantity, 0);
+      throw new ConflictError(
+        `${short} unit(s) cannot be filled from network inventory and backorders ` +
+          `are disabled. Receive stock, or enable backorder handling in Settings.`,
+      );
     }
 
     for (const shortfall of plan.shortfalls) {
@@ -422,7 +478,8 @@ export async function overrideAllocation(params: {
   }
 
   const { demand, warehouses } = await readDemandAndSupply(params.quotationId);
-  const recommended = planAllocation({ demand, warehouses }).recommended;
+  const { fulfilmentRanking } = await getSettings();
+  const recommended = planAllocation({ demand, warehouses, ranking: fulfilmentRanking }).recommended;
 
   const result = await allocateFulfillment({
     quotationId: params.quotationId,
@@ -665,6 +722,8 @@ export interface FulfillmentView {
     id: string;
     lineId: string;
     productName: string;
+    /** Dispatch is per warehouse, so the id travels with the row. */
+    warehouseId: string;
     warehouseName: string;
     requestedQuantity: number;
     allocatedQuantity: number;
@@ -682,6 +741,7 @@ export interface FulfillmentView {
   shipments: {
     id: string;
     shipmentNumber: string;
+    warehouseId: string;
     warehouseName: string;
     status: string;
     shippingCost: string;
@@ -759,6 +819,7 @@ export async function getFulfillmentView(
       id: a.id,
       lineId: a.quotationLineId,
       productName: productByLine.get(a.quotationLineId) ?? "",
+      warehouseId: a.warehouseId,
       warehouseName: a.warehouse.name,
       requestedQuantity: a.requestedQuantity,
       allocatedQuantity: a.allocatedQuantity,
@@ -776,6 +837,7 @@ export async function getFulfillmentView(
     shipments: quotation.shipments.map((sh) => ({
       id: sh.id,
       shipmentNumber: sh.shipmentNumber,
+      warehouseId: sh.warehouseId,
       warehouseName: sh.warehouse.name,
       status: sh.status,
       shippingCost: sh.shippingCost.toFixed(2),

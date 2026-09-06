@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { formatRupees } from "@/lib/money";
 import type { BuilderData, UpsellCard } from "./types";
+import { AddLineRow } from "./add-line-row";
 
 /**
  * The Quotation Builder, and with it the upsell panel (F-3) the brief places
@@ -29,8 +30,50 @@ export function QuotationBuilder({
   const [busy, startTransition] = useTransition();
   const [problem, setProblem] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<string[]>([]);
+  const [adding, setAdding] = useState(false);
 
   const suggestions = data.upsell.filter((card) => !dismissed.includes(card.productId));
+
+  /**
+   * A quotation stops being a working document once it has been sent or has
+   * gone for approval. The server refuses those edits too; the screen hides the
+   * controls rather than offering an action that would be rejected.
+   */
+  /**
+   * A quotation stops being shareable only when it is cancelled.
+   *
+   * Deliberately looser than `editable`: the customer may see a quote that is
+   * still with a reviewer, and often should - the approval is ours to resolve,
+   * not theirs to wait on.
+   */
+  const shareable = data.status !== "CANCELLED" && data.lines.length > 0;
+
+  const editable =
+    data.status === "DRAFT" &&
+    data.approvalState !== "PENDING_MANAGER" &&
+    data.approvalState !== "PENDING_FINANCE";
+
+  /**
+   * Every edit has the same shape: call, surface the reason if the server
+   * refuses, re-read. Totals, margin, risk and the approval requirement all
+   * move on any change, so nothing here predicts them.
+   */
+  function mutate(path: string, init: RequestInit, onDone?: () => void) {
+    startTransition(async () => {
+      setProblem(null);
+      const response = await fetch(path, {
+        ...init,
+        headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { error?: string } | null;
+        setProblem(body?.error ?? "That change could not be applied.");
+        return;
+      }
+      onDone?.();
+      router.refresh();
+    });
+  }
 
   function act(card: UpsellCard, action: "accept" | "dismiss") {
     startTransition(async () => {
@@ -101,6 +144,55 @@ export function QuotationBuilder({
             </p>
           </div>
         </div>
+        <div className="flex items-center gap-2">
+          {problem && (
+            <span className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1.5 max-w-md">
+              {problem}
+            </span>
+          )}
+
+          {/* Sharing is what makes the deal visible to the customer at all -
+              the portal treats an unshared quotation as not found. */}
+          {/* Sharing is NOT an edit, so it does not follow `editable`.
+              `shareWithCustomerAs` refuses only an empty quotation, and a quote
+              awaiting approval is exactly the one a rep most often wants the
+              customer looking at while the internal decision happens. Gating
+              this on `editable` made the button vanish the moment a quote was
+              submitted, which silently broke the whole path to the portal.
+              The one state where it is genuinely meaningless is a dead quote. */}
+          {shareable && (
+          <button
+            className="px-3 py-2 rounded-lg text-xs font-semibold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 transition-colors disabled:opacity-50"
+            disabled={busy || data.lines.length === 0}
+            onClick={() =>
+              mutate(`/api/quotations/${data.quotationId}/share`, { method: "POST" })
+            }
+            title={
+              data.lines.length === 0
+                ? "Add a line before sharing this with the customer"
+                : "Make this quotation visible in the customer portal"
+            }
+            type="button"
+          >
+            Share with Customer
+          </button>
+          )}
+
+          {/* Not "request approval": routing decides whether anyone has to
+              look at it. The rep is declaring the quote finished. */}
+          {editable && (
+            <button
+              className="px-3.5 py-2 rounded-lg text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50"
+              disabled={busy || data.lines.length === 0}
+              onClick={() =>
+                mutate(`/api/quotations/${data.quotationId}/submit`, { method: "POST" })
+              }
+              type="button"
+            >
+              {busy ? "Working…" : "Submit Quotation"}
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 min-h-0 flex overflow-hidden">
@@ -120,6 +212,22 @@ export function QuotationBuilder({
                 {data.customerTier ? `Reference Pricing: ${data.customerTier}` : "Reference Pricing"}
               </span>
             </div>
+            {/* Why the Edit, Remove and Add-line controls are not here.
+                Without this the cart just looks broken: the columns are gone
+                and nothing says the quotation is closed rather than the screen
+                being at fault. */}
+            {!editable && (
+              <p className="px-4 py-2.5 text-[11px] text-slate-600 bg-amber-50/60 border-b border-amber-200/70">
+                This quotation is{" "}
+                <strong className="text-slate-800">
+                  {data.status === "DRAFT"
+                    ? `awaiting ${data.approvalState === "PENDING_FINANCE" ? "Finance" : "manager"} approval`
+                    : data.status.toLowerCase()}
+                </strong>
+                , so its lines are read-only. Editing resumes if it is returned to you.
+              </p>
+            )}
+
             <div className="p-4">
               <table className="w-full text-left text-xs">
                 <thead className="text-[11px] text-slate-400 font-medium border-b border-slate-100">
@@ -129,13 +237,14 @@ export function QuotationBuilder({
                     <th className="pb-2 text-right">Unit Price</th>
                     <th className="pb-2 text-center">Disc.</th>
                     <th className="pb-2 text-right">Total</th>
+                    {editable && <th className="pb-2 text-right w-24">Edit</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {data.lines.length === 0 ? (
                     <tr>
-                      <td className="py-6 text-center text-slate-500" colSpan={5}>
-                        This quotation has no lines yet.
+                      <td className="py-6 text-center text-slate-500" colSpan={editable ? 6 : 5}>
+                        This quotation has no lines yet. Add a product below to price the deal.
                       </td>
                     </tr>
                   ) : (
@@ -152,12 +261,67 @@ export function QuotationBuilder({
                           </div>
                           <div className="text-[11px] text-slate-500">SKU: {line.sku}</div>
                         </td>
-                        <td className="py-3 text-center font-jetbrains">{line.quantity}</td>
+                        <td className="py-3 text-center font-jetbrains">
+                          {editable ? (
+                            <input
+                              aria-label={`Quantity for ${line.productName}`}
+                              className="w-14 text-center text-xs px-1.5 py-1 border border-slate-200 rounded font-jetbrains focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
+                              defaultValue={line.quantity}
+                              disabled={busy}
+                              min="1"
+                              onBlur={(event) => {
+                                // Committed on blur, not on every keystroke:
+                                // each change re-runs the whole pricing chain.
+                                const next = Number.parseInt(event.target.value, 10);
+                                if (!Number.isInteger(next) || next < 1 || next === line.quantity) {
+                                  event.target.value = String(line.quantity);
+                                  return;
+                                }
+                                mutate(`/api/quotations/${data.quotationId}/lines/${line.id}`, {
+                                  method: "PATCH",
+                                  body: JSON.stringify({ quantity: next }),
+                                });
+                              }}
+                              type="number"
+                            />
+                          ) : (
+                            line.quantity
+                          )}
+                        </td>
                         <td className="py-3 text-right font-jetbrains">
                           {formatRupees(line.unitPrice)}
                         </td>
                         <td className="py-3 text-center font-jetbrains">
-                          {line.discountPercentage}%
+                          {editable ? (
+                            <span className="inline-flex items-center gap-0.5">
+                              <input
+                                aria-label={`Discount for ${line.productName}`}
+                                className="w-14 text-center text-xs px-1.5 py-1 border border-slate-200 rounded font-jetbrains focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
+                                defaultValue={line.discountPercentage}
+                                disabled={busy}
+                                max="100"
+                                min="0"
+                                onBlur={(event) => {
+                                  const next = event.target.value.trim();
+                                  const value = Number.parseFloat(next);
+                                  if (Number.isNaN(value) || value < 0 || value > 100) {
+                                    event.target.value = String(line.discountPercentage);
+                                    return;
+                                  }
+                                  if (value === line.discountPercentage) return;
+                                  mutate(`/api/quotations/${data.quotationId}/lines/${line.id}`, {
+                                    method: "PATCH",
+                                    body: JSON.stringify({ discountPercentage: next }),
+                                  });
+                                }}
+                                step="0.5"
+                                type="number"
+                              />
+                              <span className="text-slate-400">%</span>
+                            </span>
+                          ) : (
+                            `${line.discountPercentage}%`
+                          )}
                         </td>
                         <td
                           className={
@@ -167,18 +331,53 @@ export function QuotationBuilder({
                         >
                           {formatRupees(line.lineTotal)}
                         </td>
+                        {editable && (
+                          <td className="py-3 text-right">
+                            <button
+                              aria-label={`Remove ${line.productName}`}
+                              className="text-[11px] font-semibold text-rose-600 hover:text-rose-800 hover:underline disabled:opacity-50"
+                              disabled={busy}
+                              onClick={() =>
+                                mutate(`/api/quotations/${data.quotationId}/lines/${line.id}`, {
+                                  method: "DELETE",
+                                })
+                              }
+                              type="button"
+                            >
+                              Remove
+                            </button>
+                          </td>
+                        )}
                       </tr>
                     ))
                   )}
                 </tbody>
               </table>
+
+              {editable && (
+                <AddLineRow
+                  busy={busy}
+                  onAdd={(line) =>
+                    mutate(
+                      `/api/quotations/${data.quotationId}/lines`,
+                      { method: "POST", body: JSON.stringify(line) },
+                      () => setAdding(false),
+                    )
+                  }
+                  onCancel={() => setAdding(false)}
+                  onOpen={() => setAdding(true)}
+                  open={adding}
+                />
+              )}
             </div>
           </div>
 
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs p-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <span className="text-xs font-bold text-slate-800">Deal Financial Summary</span>
-              <span className="text-[11px] text-slate-400">Recomputed on every change</span>
+              <span className="text-[11px] text-slate-400">
+                {editable ? "Recomputed on every change" : "Final figures"}
+              </span>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-3 text-xs">
               <Figure label="Subtotal" value={formatRupees(data.subtotal)} />
@@ -276,8 +475,13 @@ export function QuotationBuilder({
                     </button>
                     <button
                       className="px-3 py-1 bg-indigo-600 text-white font-semibold text-[11px] rounded-lg hover:bg-indigo-700 shadow-xs transition-all disabled:opacity-60"
-                      disabled={busy}
+                      // Adding a line is an edit, so it obeys the same rule the
+                      // cart does. The panel still ranks and explains its
+                      // suggestions on a closed deal - that is worth reading -
+                      // but it stops offering to act on one.
+                      disabled={busy || !editable}
                       onClick={() => act(card, "accept")}
+                      title={editable ? undefined : "This quotation can no longer be edited"}
                       type="button"
                     >
                       {busy ? "Adding…" : `Add ${card.suggestedQuantity} to Quote`}

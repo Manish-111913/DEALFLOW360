@@ -14,6 +14,7 @@ import { CHROME_BAR, PAGE_SUBTITLE, PAGE_TITLE, SCROLL_PADDING } from "@/compone
 import { ToastProvider, useToast, useToastState } from "@/components/toast";
 import { formatRupees } from "@/lib/money";
 import { OverrideModal } from "./override-modal";
+import { DeliveryDialog, DispatchDialog } from "./shipment-dialogs";
 
 /**
  * Screen 4 - Fulfillment & Warehouse Allocation, on live data.
@@ -80,6 +81,15 @@ export interface FulfillmentData {
     shippingCost: string;
     estimatedDeliveryDate: string | null;
     slipped: boolean;
+    /** Nothing left to record; the row stops offering a delivery button. */
+    delivered: boolean;
+  }[];
+  /** Depots holding stock reserved against this order and not yet shipped. */
+  dispatchable: {
+    warehouseId: string;
+    warehouseName: string;
+    lineCount: number;
+    units: number;
   }[];
   orderLines: {
     id: string;
@@ -88,6 +98,18 @@ export interface FulfillmentData {
     sku: string;
     quantity: number;
   }[];
+  /**
+   * D17: Finance/Operations decides allocation and dispatch; a rep watches.
+   * The same predicate the services assert with, so a button is never offered
+   * that the endpoint behind it would refuse.
+   */
+  canAllocate: boolean;
+  /**
+   * The server's business date as YYYY-MM-DD, for the two date fields.
+   * D3 keeps the clock on the server so the demo can time-travel; a date input
+   * seeded from the browser would disagree with every timestamp we write.
+   */
+  businessToday: string;
   /** Ids and free stock, so the override dialog can write real picks. */
   warehouses: {
     id: string;
@@ -111,6 +133,10 @@ function Fulfillment({ data }: { data: FulfillmentData | null }) {
   const router = useRouter();
   const showToast = useToast();
   const [overrideOpen, setOverrideOpen] = useState(false);
+  const [dispatchOpen, setDispatchOpen] = useState(false);
+  // The shipment whose arrival is being recorded, or null. Held by id rather
+  // than by object so a router refresh cannot leave a stale copy on screen.
+  const [deliveringId, setDeliveringId] = useState<string | null>(null);
   const [busy, startTransition] = useTransition();
 
   const totals = useMemo(() => {
@@ -126,6 +152,10 @@ function Fulfillment({ data }: { data: FulfillmentData | null }) {
 
   // Already allocated means the decision is made; the buttons stop offering it.
   const settled = (data?.allocations.length ?? 0) > 0;
+
+  // Looked up rather than held, so a refresh that changes a shipment's status
+  // is reflected in the open dialog instead of freezing the copy it opened with.
+  const deliveringShipment = data?.shipments.find((row) => row.id === deliveringId) ?? null;
 
   function accept() {
     if (!data) return;
@@ -145,6 +175,28 @@ function Fulfillment({ data }: { data: FulfillmentData | null }) {
     });
   }
 
+  /**
+   * Work out how this order should ship. Advisory - nothing is reserved until
+   * the split below it is accepted.
+   */
+  function plan() {
+    if (!data) return;
+    startTransition(async () => {
+      const response = await fetch("/api/fulfillment/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ quotationId: data.quotationId }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        showToast(body.error ?? "No plan could be produced for this order");
+        return;
+      }
+      showToast(`Plan ready — ${body.shipmentCount} shipment(s), freight ${body.shippingCost}.`);
+      router.refresh();
+    });
+  }
+
   function override(picks: { lineId: string; warehouseId: string; quantity: number }[], reason: string) {
     if (!data) return;
     startTransition(async () => {
@@ -160,6 +212,47 @@ function Fulfillment({ data }: { data: FulfillmentData | null }) {
       }
       setOverrideOpen(false);
       showToast("Custom allocation applied. Stock reserved.");
+      router.refresh();
+    });
+  }
+
+  function dispatch(warehouseId: string, estimatedDeliveryDate: string | null) {
+    if (!data) return;
+    startTransition(async () => {
+      const response = await fetch("/api/fulfillment/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ quotationId: data.quotationId, warehouseId, estimatedDeliveryDate }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        showToast(body.error ?? "The consignment was not dispatched");
+        return;
+      }
+      setDispatchOpen(false);
+      showToast(`${body.shipmentNumber} dispatched — ${body.allocations} line(s) released.`);
+      router.refresh();
+    });
+  }
+
+  function deliver(shipmentId: string, deliveredAt: string) {
+    startTransition(async () => {
+      const response = await fetch("/api/fulfillment/deliver", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shipmentId, deliveredAt }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        showToast(body.error ?? "The delivery was not recorded");
+        return;
+      }
+      setDeliveringId(null);
+      showToast(
+        body.slipped
+          ? `Delivered ${body.daysLate} day(s) late — the deal's delivery signal has slipped.`
+          : "Delivered on time.",
+      );
       router.refresh();
     });
   }
@@ -225,7 +318,11 @@ function Fulfillment({ data }: { data: FulfillmentData | null }) {
                   </p>
                 </div>
 
-                {!settled && data.recommended && (
+                {/* D17 again: a rep may watch fulfilment but never decide it,
+                    so the decisions are not offered to them at all. The screen
+                    previously showed these to everyone and let the endpoint
+                    return 403, which reads as a broken button. */}
+                {data.canAllocate && !settled && data.recommended && (
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg shadow-xs transition-colors disabled:opacity-60"
@@ -242,6 +339,20 @@ function Fulfillment({ data }: { data: FulfillmentData | null }) {
                       type="button"
                     >
                       {busy ? "Reserving…" : "Accept Suggested Split"}
+                    </button>
+                  </div>
+                )}
+
+                {/* Once stock is reserved the next decision is when it leaves. */}
+                {data.canAllocate && data.dispatchable.length > 0 && (
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-colors disabled:opacity-60"
+                      disabled={busy}
+                      onClick={() => setDispatchOpen(true)}
+                      type="button"
+                    >
+                      Dispatch Shipment
                     </button>
                   </div>
                 )}
@@ -281,8 +392,23 @@ function Fulfillment({ data }: { data: FulfillmentData | null }) {
                       title="Recommended Warehouse Allocation"
                     />
                   ) : (
-                    <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs p-6 text-center text-xs text-slate-500">
-                      No plan has been produced for this order yet.
+                    <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs p-6 text-center">
+                      <p className="text-xs text-slate-500">
+                        No plan has been produced for this order yet.
+                      </p>
+                      {/* The way out of this state. Orders confirmed in the
+                          portal are planned automatically; one approved but not
+                          yet confirmed is planned from here. */}
+                      {data.canAllocate && !settled && (
+                        <button
+                          className="mt-3 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-colors disabled:opacity-60"
+                          disabled={busy}
+                          onClick={plan}
+                          type="button"
+                        >
+                          {busy ? "Working out the split…" : "Produce Allocation Plan"}
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -310,7 +436,14 @@ function Fulfillment({ data }: { data: FulfillmentData | null }) {
                   />
 
                   {data.backorders.length > 0 && <Backorders rows={data.backorders} />}
-                  {data.shipments.length > 0 && <Shipments rows={data.shipments} />}
+                  {data.shipments.length > 0 && (
+                    <Shipments
+                      busy={busy}
+                      canRecord={data.canAllocate}
+                      onRecordDelivery={setDeliveringId}
+                      rows={data.shipments}
+                    />
+                  )}
                   {data.allocations.length > 0 && <Allocations rows={data.allocations} />}
                 </aside>
               </div>
@@ -337,6 +470,26 @@ function Fulfillment({ data }: { data: FulfillmentData | null }) {
           orderLines={data.orderLines}
           plan={data.recommended}
           warehouses={data.warehouses}
+        />
+      )}
+
+      {dispatchOpen && data && data.dispatchable.length > 0 && (
+        <DispatchDialog
+          busy={busy}
+          groups={data.dispatchable}
+          onClose={() => setDispatchOpen(false)}
+          onDispatch={dispatch}
+          today={data.businessToday}
+        />
+      )}
+
+      {deliveringShipment && data && (
+        <DeliveryDialog
+          busy={busy}
+          onClose={() => setDeliveringId(null)}
+          onDeliver={(deliveredAt) => deliver(deliveringShipment.id, deliveredAt)}
+          shipment={deliveringShipment}
+          today={data.businessToday}
         />
       )}
     </AppShell>
@@ -603,7 +756,17 @@ function Backorders({ rows }: { rows: FulfillmentData["backorders"] }) {
   );
 }
 
-function Shipments({ rows }: { rows: FulfillmentData["shipments"] }) {
+function Shipments({
+  rows,
+  canRecord,
+  busy,
+  onRecordDelivery,
+}: {
+  rows: FulfillmentData["shipments"];
+  canRecord: boolean;
+  busy: boolean;
+  onRecordDelivery: (shipmentId: string) => void;
+}) {
   return (
     <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs p-5">
       <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600 mb-3.5">
@@ -632,6 +795,26 @@ function Shipments({ rows }: { rows: FulfillmentData["shipments"] }) {
               <span className="font-jetbrains">{shipment.shipmentNumber}</span>
               <span>{formatRupees(shipment.shippingCost)}</span>
             </div>
+            {shipment.estimatedDeliveryDate && (
+              <div className="text-[11px] text-slate-500 mt-1">
+                Promised{" "}
+                <span className="font-jetbrains text-slate-600">
+                  {shipment.estimatedDeliveryDate.slice(0, 10)}
+                </span>
+              </div>
+            )}
+            {/* Delivered is the end of the road for a consignment, so the row
+                states the outcome instead of offering the action again. */}
+            {canRecord && !shipment.delivered && (
+              <button
+                className="mt-2.5 w-full px-3 py-1.5 text-[11px] font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg shadow-xs transition-colors disabled:opacity-60"
+                disabled={busy}
+                onClick={() => onRecordDelivery(shipment.id)}
+                type="button"
+              >
+                Record Delivery
+              </button>
+            )}
           </div>
         ))}
       </div>

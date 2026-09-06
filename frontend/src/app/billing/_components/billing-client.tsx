@@ -14,6 +14,7 @@ import { CHROME_BAR, PAGE_SUBTITLE, PAGE_TITLE, SCROLL_PADDING } from "@/compone
 import { ToastProvider, useToast, useToastState } from "@/components/toast";
 import { formatRupees, formatRupeesExact } from "@/lib/money";
 import { ModifyDrawer } from "./modify-drawer";
+import { PaymentDialog } from "./payment-dialog";
 
 /**
  * Screen 5 - Subscription & Billing, on live data.
@@ -54,6 +55,34 @@ export interface BillingSubscription {
   upcoming: BillingPeriod[];
 }
 
+/**
+ * One invoice, with what has actually been collected against it.
+ *
+ * The billing schedule names an invoice per one-time line but carries no
+ * amounts, because it is about *when* things bill. Collection is about what is
+ * owed right now, which is why this comes from the invoice ledger instead.
+ */
+export interface InvoiceRow {
+  id: string;
+  invoiceNumber: string;
+  invoiceType: string;
+  status: string;
+  total: string;
+  paidAmount: string;
+  dueAmount: string;
+  issueDate: string;
+  dueDate: string | null;
+  settled: boolean;
+  overdue: boolean;
+  payments: {
+    id: string;
+    amount: string;
+    method: string;
+    reference: string | null;
+    paidAt: string;
+  }[];
+}
+
 export interface BillingData {
   quotationId: string;
   quoteNumber: string;
@@ -61,6 +90,16 @@ export interface BillingData {
   orderTotal: string;
   oneTime: BillingLine[];
   recurring: BillingSubscription[];
+  invoices: InvoiceRow[];
+  /**
+   * Finance/Operations collects; sales does not. Same predicate the service
+   * asserts with, so the button and the endpoint cannot disagree.
+   */
+  canRecordPayment: boolean;
+  /** May raise the invoice in the first place, and run the recurring cycle. */
+  canBill: boolean;
+  /** This order has not been invoiced yet, so there is something to raise. */
+  billable: boolean;
 }
 
 type Filter = "all" | "one-time" | "recurring";
@@ -92,7 +131,12 @@ function Billing({ data }: { data: BillingData | null }) {
   const [filter, setFilter] = useState<Filter>("all");
   const [drawerFor, setDrawerFor] = useState<BillingSubscription | null>(null);
   const [cancelFor, setCancelFor] = useState<BillingSubscription | null>(null);
+  // Held by id so a refresh after a part payment reopens the dialog with the
+  // new balance rather than the one it was opened with.
+  const [payingId, setPayingId] = useState<string | null>(null);
   const [busy, startTransition] = useTransition();
+
+  const payingInvoice = data?.invoices.find((row) => row.id === payingId) ?? null;
 
   const totals = useMemo(() => {
     if (!data) return { oneTime: 0, recurring: 0 };
@@ -106,6 +150,52 @@ function Billing({ data }: { data: BillingData | null }) {
     );
     return { oneTime, recurring };
   }, [data]);
+
+  function pay(invoiceId: string, amount: string, method: string, reference: string) {
+    startTransition(async () => {
+      const response = await fetch("/api/billing/payments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invoiceId, amount, method, reference: reference || undefined }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        showToast(body.error ?? "The payment was not recorded");
+        return;
+      }
+      setPayingId(null);
+      showToast(
+        body.status === "PAID"
+          ? "Invoice settled in full."
+          : `Payment recorded. ${formatRupees(body.dueAmount)} still outstanding.`,
+      );
+      router.refresh();
+    });
+  }
+
+  function bill(quotationId?: string) {
+    startTransition(async () => {
+      const response = await fetch("/api/billing/issue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(quotationId ? { quotationId } : {}),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        showToast(body.error ?? "Nothing was billed");
+        return;
+      }
+      showToast(
+        quotationId
+          ? `Invoiced ${formatRupees(body.invoiceTotal ?? 0)}` +
+              (body.subscriptionsCreated
+                ? ` and started ${body.subscriptionsCreated} subscription(s).`
+                : ".")
+          : `Billing cycle run: ${body.invoicesCreated} invoice(s) from ${body.entriesInvoiced} due period(s).`,
+      );
+      router.refresh();
+    });
+  }
 
   function changeQuantity(subscription: BillingSubscription, quantity: number) {
     startTransition(async () => {
@@ -201,11 +291,40 @@ function Billing({ data }: { data: BillingData | null }) {
                   </p>
                 </div>
 
-                <div className="hidden lg:flex items-center space-x-2 px-3 py-1 bg-slate-50 border border-slate-200 rounded-lg text-xs">
-                  <span className="text-slate-500">Customer:</span>
-                  <span className="font-semibold text-slate-800">{data.customerName}</span>
-                  <span className="text-slate-300">|</span>
-                  <span className="font-jetbrains text-indigo-600 font-medium">{data.quoteNumber}</span>
+                <div className="flex items-center gap-2">
+                  {/* Raising the invoice had no button at all: every invoice in
+                      the database was written by the demo seed, so collection
+                      could only ever act on rows a script had created. */}
+                  {data.canBill && data.billable && (
+                    <button
+                      className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-colors disabled:opacity-60"
+                      disabled={busy}
+                      onClick={() => bill(data.quotationId)}
+                      type="button"
+                    >
+                      {busy ? "Billing…" : "Raise Invoice"}
+                    </button>
+                  )}
+                  {data.canBill && (
+                    <button
+                      className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg shadow-xs transition-colors disabled:opacity-60"
+                      disabled={busy}
+                      onClick={() => bill()}
+                      title="Invoice every subscription period that has come due"
+                      type="button"
+                    >
+                      Run Billing Cycle
+                    </button>
+                  )}
+
+                  <div className="hidden lg:flex items-center space-x-2 px-3 py-1 bg-slate-50 border border-slate-200 rounded-lg text-xs">
+                    <span className="text-slate-500">Customer:</span>
+                    <span className="font-semibold text-slate-800">{data.customerName}</span>
+                    <span className="text-slate-300">|</span>
+                    <span className="font-jetbrains text-indigo-600 font-medium">
+                      {data.quoteNumber}
+                    </span>
+                  </div>
                 </div>
               </div>
             </section>
@@ -258,6 +377,18 @@ function Billing({ data }: { data: BillingData | null }) {
             <WindowScroll className={SCROLL_PADDING}>
               {showOneTime && <OneTimeSection lines={data.oneTime} total={totals.oneTime} />}
 
+              {/* Collection sits with the one-time items it settles, and is
+                  hidden entirely on an order that has not been invoiced yet -
+                  an empty ledger is noise, not information. */}
+              {showOneTime && data.invoices.length > 0 && (
+                <InvoiceLedger
+                  busy={busy}
+                  canRecordPayment={data.canRecordPayment}
+                  onRecordPayment={setPayingId}
+                  rows={data.invoices}
+                />
+              )}
+
               {showRecurring &&
                 (data.recurring.length === 0 ? (
                   <section className="bg-white rounded-xl border border-slate-200/90 shadow-2xs p-6 text-center">
@@ -303,6 +434,17 @@ function Billing({ data }: { data: BillingData | null }) {
         />
       )}
 
+      {payingInvoice && (
+        <PaymentDialog
+          busy={busy}
+          invoice={payingInvoice}
+          onClose={() => setPayingId(null)}
+          onConfirm={(amount, method, reference) =>
+            pay(payingInvoice.id, amount, method, reference)
+          }
+        />
+      )}
+
       {cancelFor && (
         <CancelModal
           busy={busy}
@@ -344,6 +486,149 @@ function Metric({
         {value}
       </span>
     </div>
+  );
+}
+
+const PAYMENT_METHOD: Record<string, string> = {
+  BANK_TRANSFER: "Bank transfer",
+  CARD: "Card",
+  CHEQUE: "Cheque",
+  CASH: "Cash",
+  OTHER: "Other",
+};
+
+/** "12 Mar 2026" - the format the rest of this screen already uses. */
+function shortDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+/**
+ * What has been invoiced and what has actually been collected.
+ *
+ * The One-Time Items table above says an invoice exists and what state it is
+ * in; this says how much of it is still owed, which is the only part anyone can
+ * act on. Payments already taken are listed under each invoice rather than
+ * summed away, because "paid" is a claim someone should be able to check.
+ */
+function InvoiceLedger({
+  rows,
+  canRecordPayment,
+  busy,
+  onRecordPayment,
+}: {
+  rows: InvoiceRow[];
+  canRecordPayment: boolean;
+  busy: boolean;
+  onRecordPayment: (invoiceId: string) => void;
+}) {
+  const outstanding = rows.reduce((sum, row) => sum + Number(row.dueAmount), 0);
+
+  return (
+    <section className="bg-white rounded-xl border border-slate-200/90 shadow-2xs overflow-hidden transition-all">
+      <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between">
+        <div>
+          <div className="flex items-center space-x-2">
+            <h2 className="text-sm font-bold text-slate-900">Invoice Ledger</h2>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-700">
+              {rows.length} invoice{rows.length === 1 ? "" : "s"}
+            </span>
+          </div>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Issued documents and the payments received against them.
+          </p>
+        </div>
+        <div className="text-right">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+            Outstanding
+          </p>
+          <p
+            className={
+              "text-base font-extrabold font-jetbrains " +
+              (outstanding > 0 ? "text-amber-600" : "text-emerald-600")
+            }
+          >
+            {formatRupees(outstanding)}
+          </p>
+        </div>
+      </div>
+
+      <div className="divide-y divide-slate-100">
+        {rows.map((invoice) => (
+          <div className="p-4 sm:p-5" key={invoice.id}>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <div className="flex items-center space-x-2">
+                  <span className="font-jetbrains text-xs font-bold text-slate-900">
+                    {invoice.invoiceNumber}
+                  </span>
+                  <span
+                    className={
+                      "px-2 py-0.5 rounded-full text-[10px] font-semibold border " +
+                      (invoice.settled
+                        ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                        : invoice.overdue
+                          ? "bg-rose-50 text-rose-700 border-rose-200"
+                          : "bg-amber-50 text-amber-700 border-amber-200")
+                    }
+                  >
+                    {invoice.settled ? "Settled" : invoice.overdue ? "Overdue" : invoice.status}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Issued {shortDate(invoice.issueDate)}
+                  {invoice.dueDate ? ` · due ${shortDate(invoice.dueDate)}` : ""}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-5">
+                <div className="text-right">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Collected
+                  </p>
+                  <p className="text-xs font-bold text-slate-800 font-jetbrains">
+                    {formatRupees(invoice.paidAmount)} / {formatRupees(invoice.total)}
+                  </p>
+                </div>
+                {canRecordPayment && !invoice.settled && (
+                  <button
+                    className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-colors disabled:opacity-60 shrink-0"
+                    disabled={busy}
+                    onClick={() => onRecordPayment(invoice.id)}
+                    type="button"
+                  >
+                    Record Payment
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {invoice.payments.length > 0 && (
+              <div className="mt-3 pt-3 border-t border-slate-100 space-y-1.5">
+                {invoice.payments.map((payment) => (
+                  <div
+                    className="flex items-center justify-between text-[11px] text-slate-500"
+                    key={payment.id}
+                  >
+                    <span>
+                      {shortDate(payment.paidAt)} ·{" "}
+                      {PAYMENT_METHOD[payment.method] ?? payment.method}
+                      {payment.reference ? ` · ${payment.reference}` : ""}
+                    </span>
+                    <span className="font-jetbrains font-bold text-emerald-700">
+                      {formatRupees(payment.amount)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

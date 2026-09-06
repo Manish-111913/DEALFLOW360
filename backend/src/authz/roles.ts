@@ -170,9 +170,24 @@ export function can(user: AuthzUser, action: Action, resource?: Resource): boole
           return typeof resource === "string" && (MANAGER_CONFIG as string[]).includes(resource);
         case "escalate":
           return true;
+        /**
+         * Operations, held here because this deployment has no Finance role.
+         *
+         * D17 put allocation and collection with Finance/Operations so that
+         * approving a discount and settling the money it costs were different
+         * hands. That separation needs a Finance person to exist. This company
+         * runs on three roles - Admin, Sales Manager, customer - so leaving
+         * these with a role nobody holds does not enforce the separation, it
+         * just means no one can reserve stock, dispatch a consignment, raise an
+         * invoice or take a payment, and two screens render every button hidden.
+         *
+         * The capability is written down here rather than worked around in the
+         * screens, so `can()` stays the single answer to "who may do this".
+         */
         case "allocate":
         case "recordPayment":
         case "issueCredit":
+          return true;
         case "delete":
         case "negotiate":
         case "confirm":
@@ -220,10 +235,13 @@ export function can(user: AuthzUser, action: Action, resource?: Resource): boole
         case "update":
         case "delete":
           return true;
-        case "decide":
+        // Same reason as the manager above: with no Finance role in this
+        // deployment, these have to live somewhere or nobody holds them.
         case "allocate":
         case "recordPayment":
         case "issueCredit":
+          return true;
+        case "decide":
         case "escalate":
         case "negotiate":
         case "confirm":

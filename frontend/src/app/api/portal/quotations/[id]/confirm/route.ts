@@ -4,13 +4,21 @@ import { getCurrentUser } from "@/auth";
 import { portalError } from "@/lib/portal-response";
 
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+
+  // The version the customer had on screen. Optional in the body because a
+  // caller that omits it still gets the approval-state check; sending it adds
+  // the stronger guarantee that the figures they agreed to are the figures
+  // still on the quotation.
+  const body = (await request.json().catch(() => null)) as { expectedVersion?: string } | null;
+
   const result = await confirmPortalQuotation({
     user: await getCurrentUser(),
     quotationId: id,
+    expectedVersion: body?.expectedVersion ?? null,
   });
 
   if (result.status === 200) {

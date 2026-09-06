@@ -46,7 +46,7 @@ function PortalLogin() {
         );
         return;
       }
-      router.push(ROUTES.negotiation);
+      router.push(ROUTES.customerHome);
       router.refresh();
     })();
   }, [token, router]);

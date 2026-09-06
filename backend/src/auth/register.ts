@@ -65,14 +65,25 @@ export async function registerInternalUser(input: InternalSignupInput) {
   return user;
 }
 
-/** Portal identities are created by staff, never self-registered. */
+/**
+ * Portal identities are created by staff, never self-registered.
+ *
+ * The password is optional because the two ways in are both real. A contact
+ * given one signs in at the portal's own login screen whenever they like; a
+ * contact given none can still be sent a single-use link, which is the faster
+ * handover when a quotation is going out today. What is no longer true is that
+ * a portal contact *never* holds a password - they did not, and that left the
+ * sign-in screen with nothing to accept.
+ */
 export async function createPortalUser(params: {
   email: string;
   name: string;
   customerId: string;
   actorId?: string;
+  password?: string;
 }) {
   const now = currentBusinessTime();
+  const password = params.password?.trim();
   const user = await prisma.user.create({
     data: {
       email: params.email.trim().toLowerCase(),
@@ -80,7 +91,7 @@ export async function createPortalUser(params: {
       kind: "PORTAL",
       role: null,
       customerId: params.customerId,
-      passwordHash: null,
+      passwordHash: password ? await hashPassword(password) : null,
       createdAt: now,
       updatedAt: now,
     },

@@ -71,18 +71,29 @@ const KPI_STYLES: Record<
 export function DealHealthClient({
   initialRows,
   denied,
+  canAct,
 }: {
   initialRows: HealthRow[];
   denied: boolean;
+  /** Holds the `escalate` capability: may raise alerts and may close them. */
+  canAct: boolean;
 }) {
   return (
     <ToastProvider durationMs={3000}>
-      <Board denied={denied} initialRows={initialRows} />
+      <Board canAct={canAct} denied={denied} initialRows={initialRows} />
     </ToastProvider>
   );
 }
 
-function Board({ initialRows, denied }: { initialRows: HealthRow[]; denied: boolean }) {
+function Board({
+  initialRows,
+  denied,
+  canAct,
+}: {
+  initialRows: HealthRow[];
+  denied: boolean;
+  canAct: boolean;
+}) {
   const showToast = useToast();
   const [rows, setRows] = useState(initialRows);
   const [selectedId, setSelectedId] = useState<string | null>(initialRows[0]?.quotationId ?? null);
@@ -135,6 +146,39 @@ function Board({ initialRows, denied }: { initialRows: HealthRow[]; denied: bool
       setEscalated((current) => [...current, row.quotationId]);
       showToast(`Escalation created for ${row.customerName}`);
       // The escalation writes an alert, so the board it came from has changed.
+      await reload();
+    });
+  }
+
+  function resolve(alertId: string) {
+    startTransition(async () => {
+      const response = await fetch("/api/deal-health/alerts/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ alertId }),
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        showToast(body.error ?? "The alert was not resolved");
+        return;
+      }
+      showToast("Alert resolved.");
+      // Closing an alert changes the row's open count and can change its
+      // severity, so the board is reloaded rather than patched in place.
+      await reload();
+    });
+  }
+
+  function rescore() {
+    startTransition(async () => {
+      const response = await fetch("/api/deal-health/recompute", { method: "POST" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        showToast(body.error ?? "The board could not be rescored");
+        return;
+      }
+      showToast(`${body.scored} deal(s) rescored against today.`);
       await reload();
     });
   }
@@ -278,6 +322,23 @@ function Board({ initialRows, denied }: { initialRows: HealthRow[]; denied: bool
                     >
                       Reset
                     </button>
+                    {/* Health is time-sensitive - a deal goes stale by the
+                        clock moving, not by anyone touching it - and until now
+                        every score on this board was whatever the seed wrote,
+                        with no way to ask for a fresh one. `recomputeAllDealHealth`
+                        called itself "the cron" and had neither a scheduler nor
+                        a button. This is the button. */}
+                    {canAct && (
+                      <button
+                        className="ml-2 px-2.5 py-1 rounded-lg text-[11px] font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 transition-colors disabled:opacity-50"
+                        disabled={busy}
+                        onClick={rescore}
+                        title="Score every live deal against today's date"
+                        type="button"
+                      >
+                        {busy ? "Rescoring…" : "Rescore board"}
+                      </button>
+                    )}
                   </div>
 
                   <div className="flex items-center space-x-1 pt-1 border-t border-slate-100 text-xs overflow-x-auto">
@@ -380,8 +441,10 @@ function Board({ initialRows, denied }: { initialRows: HealthRow[]; denied: bool
             {selected ? (
               <DealDrawer
                 busy={busy}
+                canAct={canAct}
                 escalated={escalated.includes(selected.quotationId)}
                 onEscalate={() => escalate(selected)}
+                onResolve={resolve}
                 row={selected}
               />
             ) : (
@@ -410,12 +473,16 @@ function DealDrawer({
   row,
   busy,
   escalated,
+  canAct,
   onEscalate,
+  onResolve,
 }: {
   row: HealthRow;
   busy: boolean;
   escalated: boolean;
+  canAct: boolean;
   onEscalate: () => void;
+  onResolve: (alertId: string) => void;
 }) {
   const severity = SEVERITY[row.severity];
 
@@ -489,13 +556,27 @@ function DealDrawer({
           ) : (
             row.openAlerts.map((alert) => (
               <div
-                className="flex items-start justify-between gap-2 p-2 rounded-lg bg-slate-50 border border-slate-200/80"
+                className="p-2 rounded-lg bg-slate-50 border border-slate-200/80"
                 key={alert.id}
               >
-                <span className={"font-medium shrink-0 " + ALERT[alert.type].style}>
-                  {ALERT[alert.type].label}
-                </span>
-                <span className="text-[11px] text-slate-500 text-right">{alert.message}</span>
+                <div className="flex items-start justify-between gap-2">
+                  <span className={"font-medium shrink-0 " + ALERT[alert.type].style}>
+                    {ALERT[alert.type].label}
+                  </span>
+                  <span className="text-[11px] text-slate-500 text-right">{alert.message}</span>
+                </div>
+                {/* The board could previously only grow: escalation wrote
+                    alerts and nothing in the product ever cleared one. */}
+                {canAct && (
+                  <button
+                    className="mt-2 w-full px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg transition-colors disabled:opacity-60"
+                    disabled={busy}
+                    onClick={() => onResolve(alert.id)}
+                    type="button"
+                  >
+                    Resolve
+                  </button>
+                )}
               </div>
             ))
           )}
@@ -507,19 +588,26 @@ function DealDrawer({
           Recommended Action
         </h3>
         <p className="text-xs text-slate-700 leading-relaxed">{row.recommendedAction}</p>
-        <div className="flex items-center space-x-2 pt-1">
-          <button
-            className={
-              "flex-1 px-3 py-2 text-white rounded-lg text-xs font-semibold shadow-xs transition-all disabled:opacity-60 " +
-              (escalated ? "bg-emerald-600" : "bg-indigo-600 hover:bg-indigo-700")
-            }
-            disabled={busy || escalated}
-            onClick={onEscalate}
-            type="button"
-          >
-            {escalated ? "Escalated" : busy ? "Working…" : "Escalate"}
-          </button>
-        </div>
+        {canAct ? (
+          <div className="flex items-center space-x-2 pt-1">
+            <button
+              className={
+                "flex-1 px-3 py-2 text-white rounded-lg text-xs font-semibold shadow-xs transition-all disabled:opacity-60 " +
+                (escalated ? "bg-emerald-600" : "bg-indigo-600 hover:bg-indigo-700")
+              }
+              disabled={busy || escalated}
+              onClick={onEscalate}
+              type="button"
+            >
+              {escalated ? "Escalated" : busy ? "Working…" : "Escalate"}
+            </button>
+          </div>
+        ) : (
+          <p className="text-[11px] text-slate-500 pt-1">
+            Escalation sits with the deal&rsquo;s Sales Manager. This board is read-only for your
+            role.
+          </p>
+        )}
       </div>
     </div>
   );

@@ -26,7 +26,7 @@ import { ROUTES } from "@/lib/navigation";
  */
 export default async function LandingPage() {
   const user = await getCurrentUser();
-  if (user) redirect(user.kind === "PORTAL" ? ROUTES.negotiation : ROUTES.home);
+  if (user) redirect(user.kind === "PORTAL" ? ROUTES.customerHome : ROUTES.home);
 
   return (
     <div className="bg-[#fafbfe] text-slate-900 font-jakarta antialiased selection:bg-indigo-100 selection:text-indigo-700">

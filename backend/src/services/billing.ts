@@ -692,6 +692,19 @@ export async function recordPayment(params: {
   const now = currentBusinessTime();
   const { currencyMinorUnits } = await getSettings();
 
+  // An overpayment cannot be represented honestly here. `dueAmount` is clamped
+  // at zero below, so paying more than is owed leaves the invoice reading PAID
+  // with `paidAmount` above `total` and nothing recording the difference - no
+  // credit note, nothing to refund it against, and a ledger that no longer adds
+  // up. Refusing is the only accurate answer; a genuine overpayment is a credit
+  // note, which is its own deliberate act.
+  if (amount.greaterThan(invoice.dueAmount)) {
+    throw new ConflictError(
+      `That is more than the ${invoice.dueAmount.toFixed(currencyMinorUnits)} outstanding ` +
+        `on ${invoice.invoiceNumber}.`,
+    );
+  }
+
   const paidAmount = invoice.paidAmount
     .plus(amount)
     .toDecimalPlaces(currencyMinorUnits, Decimal.ROUND_HALF_UP);

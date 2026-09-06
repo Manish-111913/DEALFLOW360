@@ -15,7 +15,12 @@
     "db:reset": "prisma migrate reset --force",
     "db:seed": "tsx --env-file=../.env prisma/seed.ts",
     "db:seed:demo": "tsx --env-file=../.env prisma/seed-demo.ts",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "realtime": "tsx --env-file=../.env realtime-server.ts",
+    "db:seed:pro": "tsx --env-file=../.env prisma/seed-professional.ts",
+    "portal:link": "tsx --env-file=../.env portal-link.ts",
+    "db:seed:showcase": "tsx --env-file=../.env prisma/seed-showcase.ts",
+    "db:fresh": "prisma migrate reset --force && npm run db:seed && npm run db:seed:showcase"
   },
   "dependencies": {
     "@google/genai": "^2.21.0",
@@ -23,12 +28,14 @@
     "@prisma/client": "7.10.0",
     "bcryptjs": "3.0.3",
     "pdfkit": "^0.20.2",
+    "ws": "^8.21.3",
     "zod": "4.5.4"
   },
   "devDependencies": {
     "@types/node": "^24",
     "@types/pdfkit": "^0.17.6",
     "@types/pg": "^8.23.1",
+    "@types/ws": "^8.18.1",
     "dotenv": "^17",
     "pg": "^8.23.0",
     "prisma": "7.10.0",

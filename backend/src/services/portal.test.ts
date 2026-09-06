@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { isPendingApproval } from "../domain/approval";
 import { Prisma } from "../generated/prisma/client";
 import { auditTrailFor } from "../audit";
 import type { AuthzUser } from "../authz/roles";
@@ -342,7 +343,10 @@ describe("the portal payload leaks nothing internal", () => {
     const { quotationId, serviceLineId } = await approvedAtTenPercent();
 
     let view = await viewPortalQuotation(acmeBuyer, quotationId);
-    expect(view.status === 200 && view.quotation.status).toBe("Sent");
+    // Approved and waiting on the customer, which the vocabulary now says
+    // plainly. It used to read "Sent", which did not distinguish a quote the
+    // customer could act on from one still being worked on.
+    expect(view.status === 200 && view.quotation.status).toBe("Ready to Confirm");
 
     await submitNegotiation({
       user: acmeBuyer,
@@ -353,8 +357,12 @@ describe("the portal payload leaks nothing internal", () => {
     });
 
     view = await viewPortalQuotation(acmeBuyer, quotationId);
-    // Internally this is PENDING_MANAGER; the customer is told only this.
-    expect(view.status === 200 && view.quotation.status).toBe("Under Negotiation");
+    // Internally this is PENDING_MANAGER. The customer is told "Under Review",
+    // which is the answer to the question they actually have - is anyone
+    // waiting on me? - and still says nothing about which desk holds it or why.
+    // "Under Negotiation" is reserved for a thread that is open and *not* in
+    // approval, where the customer can still move it.
+    expect(view.status === 200 && view.quotation.status).toBe("Under Review");
     expect(view.status === 200 && view.quotation.awaitingSellerReview).toBe(true);
   });
 
@@ -511,5 +519,172 @@ describe("the approval request agrees with the quotation it belongs to", () => {
     });
 
     expect(request.riskScore.toFixed(2)).toBe(quotation.riskScore.toFixed(2));
+  });
+});
+
+/**
+ * A customer countering while their quote is already in someone's queue.
+ *
+ * This is an entirely ordinary thing for a customer to do - they asked for
+ * something, it went to a manager, and while waiting they ask for something
+ * else - and it used to produce a 500. `submitNegotiation` called
+ * `submitForApproval` whenever the what-if said re-approval was needed, and
+ * that refuses a quotation which is already awaiting approval.
+ */
+describe("countering a quotation that is already awaiting approval", () => {
+  it("is accepted rather than crashing, and does not queue it twice", async () => {
+    const { quotationId, serviceLineId } = await approvedAtTenPercent();
+
+    // The first counter is what pushes it into the manager's queue.
+    await submitNegotiation({
+      user: acmeBuyer,
+      quotationId,
+      requestType: "COUNTER_DISCOUNT",
+      lineId: serviceLineId,
+      requestedValue: 20,
+      reason: "first ask",
+    });
+
+    const before = await prisma.quotation.findUniqueOrThrow({ where: { id: quotationId } });
+    expect(isPendingApproval(before.approvalState)).toBe(true);
+
+    const openRequestsBefore = await prisma.approvalRequest.count({
+      where: { quotationId, status: "PENDING" },
+    });
+
+    const result = await submitNegotiation({
+      user: acmeBuyer,
+      quotationId,
+      requestType: "COUNTER_DISCOUNT",
+      lineId: serviceLineId,
+      requestedValue: 25,
+      reason: "Asking again while the first request is still being reviewed",
+    });
+
+    expect(result.status).toBe(200);
+    if (result.status !== 200) throw new Error("unreachable");
+    expect(result.outcome).toBe("ACCEPTED_PENDING_APPROVAL");
+
+    // Still exactly one thing for the manager to act on.
+    const openRequestsAfter = await prisma.approvalRequest.count({
+      where: { quotationId, status: "PENDING" },
+    });
+    expect(openRequestsAfter).toBe(openRequestsBefore);
+
+    const after = await prisma.quotation.findUniqueOrThrow({ where: { id: quotationId } });
+    expect(isPendingApproval(after.approvalState)).toBe(true);
+  });
+
+  it("still records the request, so the history is not lost", async () => {
+    const { quotationId, serviceLineId } = await approvedAtTenPercent();
+
+    for (const value of [15, 20]) {
+      await submitNegotiation({
+        user: acmeBuyer,
+        quotationId,
+        requestType: "COUNTER_DISCOUNT",
+        lineId: serviceLineId,
+        requestedValue: value,
+        reason: `asking for ${value}%`,
+      });
+    }
+
+    // Both asks survive; a later request does not overwrite an earlier one.
+    const requests = await prisma.negotiationRequest.findMany({
+      where: { negotiation: { quotationId } },
+      orderBy: { createdAt: "asc" },
+    });
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    expect(requests.map((r) => r.requestedValue?.toFixed(0))).toEqual(
+      expect.arrayContaining(["15", "20"]),
+    );
+  });
+});
+
+/**
+ * A double-clicked Submit button (§21).
+ *
+ * Not merely untidy: every counter-offer increments `negotiationCount`, and the
+ * risk engine scores repeated negotiation. Two records for one click therefore
+ * made a deal look riskier than it is, and could push it over an approval band
+ * on their own.
+ *
+ * The guard is a per-quotation advisory lock around resolving the thread and
+ * inserting the request. The thread resolution has to be inside it: two
+ * concurrent submissions that each create their own negotiation would then look
+ * for duplicates in two different threads and find none either time.
+ */
+describe("a double-submitted request is recorded once", () => {
+  it("collapses two simultaneous identical asks into one", async () => {
+    const { quotationId, serviceLineId } = await approvedAtTenPercent();
+    const before = await prisma.quotation.findUniqueOrThrow({ where: { id: quotationId } });
+
+    const ask = () =>
+      submitNegotiation({
+        user: acmeBuyer,
+        quotationId,
+        requestType: "COUNTER_DISCOUNT",
+        lineId: serviceLineId,
+        requestedValue: 18,
+        reason: "please consider 18%",
+      });
+
+    const [first, second] = await Promise.all([ask(), ask()]);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    if (first.status !== 200 || second.status !== 200) throw new Error("unreachable");
+    // The retry is told about the original, so it cannot tell it was de-duped.
+    expect(second.requestId).toBe(first.requestId);
+
+    expect(
+      await prisma.negotiation.count({ where: { quotationId, status: "OPEN" } }),
+    ).toBe(1);
+    expect(
+      await prisma.negotiationRequest.count({ where: { negotiation: { quotationId } } }),
+    ).toBe(1);
+
+    // The count the risk engine reads moved by one, not two.
+    const after = await prisma.quotation.findUniqueOrThrow({ where: { id: quotationId } });
+    expect(after.negotiationCount).toBe(before.negotiationCount + 1);
+  });
+
+  it("survives a burst, not just a pair", async () => {
+    const { quotationId, serviceLineId } = await approvedAtTenPercent();
+
+    await Promise.all(
+      Array.from({ length: 5 }, () =>
+        submitNegotiation({
+          user: acmeBuyer,
+          quotationId,
+          requestType: "COUNTER_DISCOUNT",
+          lineId: serviceLineId,
+          requestedValue: 19,
+          reason: "five at once",
+        }),
+      ),
+    );
+
+    expect(
+      await prisma.negotiationRequest.count({ where: { negotiation: { quotationId } } }),
+    ).toBe(1);
+  });
+
+  it("still records a genuinely different ask", async () => {
+    const { quotationId, serviceLineId } = await approvedAtTenPercent();
+
+    await submitNegotiation({
+      user: acmeBuyer, quotationId, requestType: "COUNTER_DISCOUNT",
+      lineId: serviceLineId, requestedValue: 18, reason: "first",
+    });
+    await submitNegotiation({
+      user: acmeBuyer, quotationId, requestType: "COUNTER_DISCOUNT",
+      lineId: serviceLineId, requestedValue: 22, reason: "second, different",
+    });
+
+    // Changing your mind is not a duplicate.
+    expect(
+      await prisma.negotiationRequest.count({ where: { negotiation: { quotationId } } }),
+    ).toBe(2);
   });
 });

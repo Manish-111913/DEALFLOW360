@@ -64,9 +64,22 @@ export interface WarehouseSnapshot {
   available: Record<string, number>;
 }
 
+/**
+ * How competing plans are ranked once each has filled as much as it can.
+ *
+ * D9 says "minimise the number of shipments", and that stays the default. A
+ * company whose freight dominates its handling cost sets COST_FIRST instead,
+ * and the allocator genuinely picks a different plan - this is not a label.
+ * Unfilled demand outranks both either way: a plan that leaves stock unshipped
+ * is worse than one that costs more, whatever the tie-break says.
+ */
+export type PlanRanking = "SHIPMENTS_FIRST" | "COST_FIRST";
+
 export interface AllocationInput {
   demand: DemandLine[];
   warehouses: WarehouseSnapshot[];
+  /** Defaults to D9's rule, so every existing caller keeps its behaviour. */
+  ranking?: PlanRanking;
 }
 
 /** Stock is held per product *and* variant, so both form the key. */
@@ -319,17 +332,26 @@ function priorityOrderPlan(input: AllocationInput): AllocationPlan {
 // Ranking
 // ---------------------------------------------------------------------------
 
-/** Fewest unfulfilled units, then fewest shipments, then cheapest. */
-function comparePlans(a: AllocationPlan, b: AllocationPlan): number {
+/**
+ * Fewest unfulfilled units first, then the configured tie-break.
+ *
+ * Unmet demand always comes first. The choice the setting makes is only what
+ * happens between two plans that fill the same amount: fewer shipments and
+ * accept the freight, or cheaper freight and accept the extra parcel.
+ */
+function comparePlans(a: AllocationPlan, b: AllocationPlan, ranking: PlanRanking): number {
   const unmet = (p: AllocationPlan) => p.shortfalls.reduce((acc, s) => acc + s.quantity, 0);
 
   const byUnmet = unmet(a) - unmet(b);
   if (byUnmet !== 0) return byUnmet;
 
   const byShipments = a.shipmentCount - b.shipmentCount;
-  if (byShipments !== 0) return byShipments;
+  const byCost = a.shippingCost.comparedTo(b.shippingCost);
 
-  return a.shippingCost.comparedTo(b.shippingCost);
+  if (ranking === "COST_FIRST") {
+    return byCost !== 0 ? byCost : byShipments;
+  }
+  return byShipments !== 0 ? byShipments : byCost;
 }
 
 function samePlan(a: AllocationPlan, b: AllocationPlan): boolean {
@@ -341,11 +363,12 @@ function samePlan(a: AllocationPlan, b: AllocationPlan): boolean {
 }
 
 export function planAllocation(input: AllocationInput): AllocationResult {
+  const ranking = input.ranking ?? "SHIPMENTS_FIRST";
   const candidates = [
     ...singleSourcePlans(input),
     fewestWarehousesPlan(input),
     priorityOrderPlan(input),
-  ].sort(comparePlans);
+  ].sort((a, b) => comparePlans(a, b, ranking));
 
   const recommended = candidates[0];
   const runnerUp = candidates.find((p) => !samePlan(p, recommended)) ?? null;
@@ -362,6 +385,9 @@ export function planAllocation(input: AllocationInput): AllocationResult {
         lines: String(input.demand.length),
         warehouses: input.warehouses.map((w) => w.warehouseName).join(", ") || "none",
         strategy: recommended.strategy,
+        // D22: the explanation says which tie-break produced this answer, so a
+        // plan that changed after a settings edit says why.
+        ranking,
       },
       steps: [
         step("Plans considered", candidates.map((c) => c.strategy).join(", "), String(candidates.length)),

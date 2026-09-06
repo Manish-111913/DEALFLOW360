@@ -39,15 +39,50 @@ const MAX_ENTRIES = 200;
 
 const store = new Map<string, Entry<unknown>>();
 
+/**
+ * The identity of everything the answer was built from.
+ *
+ * The quotation's own timestamps are not enough. The context a card is generated
+ * against also carries fulfilment, billing, the customer's tier and the
+ * company-wide settings the engines read - and none of those touch the quotation
+ * row when they change. So dispatching a shipment, recording a payment, or
+ * tightening a discount ceiling would all leave yesterday's summary standing,
+ * still confidently describing a state that no longer exists. That is the one
+ * failure mode a cache like this must not have: being wrong rather than slow.
+ *
+ * Six indexed reads to avoid one model call is a trade worth making every time.
+ */
 async function versionOf(quotationId: string): Promise<string> {
   const row = await prisma.quotation.findUnique({
     where: { id: quotationId },
-    select: { updatedAt: true, lastActivityAt: true },
+    select: { updatedAt: true, lastActivityAt: true, customerId: true },
   });
   if (!row) return "missing";
+
+  const [shipments, invoices, allocations, customer, settings] = await Promise.all([
+    prisma.shipment.aggregate({ where: { quotationId }, _max: { updatedAt: true } }),
+    prisma.invoice.aggregate({ where: { quotationId }, _max: { updatedAt: true } }),
+    prisma.fulfillmentAllocation.aggregate({ where: { quotationId }, _max: { updatedAt: true } }),
+    prisma.customer.findUnique({ where: { id: row.customerId }, select: { updatedAt: true } }),
+    // Settings have no per-deal row, so the whole table's high-water mark stands
+    // in: any configuration change invalidates every cached card, which is the
+    // safe direction to be wrong in.
+    prisma.systemSetting.aggregate({ _max: { updatedAt: true } }),
+  ]);
+
+  const stamp = (value: Date | null | undefined) => (value ? value.getTime() : 0);
+
   // lastActivityAt moves on negotiation and approval events that do not
   // necessarily touch updatedAt, so both are part of the identity.
-  return `${row.updatedAt.getTime()}:${row.lastActivityAt.getTime()}`;
+  return [
+    row.updatedAt.getTime(),
+    row.lastActivityAt.getTime(),
+    stamp(shipments._max.updatedAt),
+    stamp(invoices._max.updatedAt),
+    stamp(allocations._max.updatedAt),
+    stamp(customer?.updatedAt),
+    stamp(settings._max.updatedAt),
+  ].join(":");
 }
 
 /**

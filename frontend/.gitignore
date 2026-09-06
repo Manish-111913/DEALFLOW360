@@ -8,7 +8,14 @@
 /node_modules
 
 # next.js
+#
+# Each surface builds into its own directory - `next dev` locks the one it is
+# using and refuses a second server sharing it, so the internal workspace and
+# the customer portal need separate ones to run at the same time. The glob
+# covers all of them; `/.next/` alone left several hundred generated files
+# showing up as untracked changes.
 /.next/
+/.next-*/
 /out/
 /build
 

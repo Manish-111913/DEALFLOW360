@@ -149,8 +149,35 @@ export async function runSalesReport(params: {
 }): Promise<SalesReport> {
   assertCan(params.user, "view", "report");
 
-  const filters = params.filters ?? {};
-  const { currencyCode } = await getSettings();
+  const settings = await getSettings();
+  const { currencyCode } = settings;
+
+  /**
+   * Configured defaults fill in only what the caller did not ask for.
+   *
+   * A report run with no period would otherwise scan the whole history, which
+   * is rarely what anyone means. The Settings screen sets the window and the
+   * approval states, and an explicit filter always wins - so the defaults shape
+   * the unspecified case rather than overriding a deliberate one.
+   */
+  const requested = params.filters ?? {};
+  const noPeriod = !requested.from && !requested.to;
+  const filters: ReportFilters = {
+    ...requested,
+    from:
+      requested.from ??
+      (noPeriod
+        ? new Date(
+            currentBusinessTime().getTime() -
+              settings.reportingDefaultPeriodDays * 86_400_000,
+          )
+        : null),
+    approvalStates:
+      requested.approvalStates ??
+      (settings.reportingDefaultStates.length > 0
+        ? (settings.reportingDefaultStates as ApprovalState[])
+        : null),
+  };
 
   // Two independent gates: what the caller asked for, and what they may see.
   const quotations = await prisma.quotation.findMany({

@@ -303,3 +303,17 @@
   background-image: radial-gradient(rgba(99, 102, 241, 0.06) 1px, transparent 1px);
   background-size: 24px 24px;
 }
+
+/**
+ * The customer portal's desktop backdrop.
+ *
+ * A pair of properties that must stay in step (image plus size), which is why
+ * it is a class rather than an arbitrary Tailwind value - the same reason
+ * `.auth-grid` exists. Cooler and lighter than the internal shell's flat
+ * background, because the portal is a different surface for a different person.
+ */
+.customer-desktop {
+  background-color: #eef2f8;
+  background-image: radial-gradient(#d1d9e6 1px, transparent 1px);
+  background-size: 20px 20px;
+}
